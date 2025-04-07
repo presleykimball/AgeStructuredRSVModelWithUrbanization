@@ -28,3 +28,6 @@ contains scripts for all the functions referenced in the rmd files. See scripts 
 
 #### data 
 contains data files to run data analysis and SIR simulations
+
+#### supplement-age_dist_figure
+contains code to build age distribution of United States and ANOVA testing
