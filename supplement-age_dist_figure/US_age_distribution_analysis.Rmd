@@ -9,7 +9,7 @@ output: html_document
 library(dplyr)
 library(ggplot2)
 library(RColorBrewer)
-setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModel/supplement-age_dist_figure")
+setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization/supplement-age_dist_figure")
 palette_4 <- brewer.pal(4, "Spectral") 
 ```
 
@@ -21,6 +21,10 @@ age_cats <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
                  "60-65", "65-70", "70-75", "75+")
 
 # load in data
+# need to load in through download of zip file at  https://seer.cancer.gov/popdata/download.html
+# Download 'County-Level Population Files - Single-year Age Groups' All States Combined
+# file needed is called "us.1969_2023.singleages.through89.90plus.adjusted.txt".
+# once in directory, uncomment following line:
 raw_age_data <- read.table("us.1969_2023.singleages.through89.90plus.adjusted.txt",header = F,sep = "\n")
 
 # only keep 2010 data
