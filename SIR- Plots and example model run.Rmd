@@ -1,0 +1,248 @@
+---
+title: "Plots and Example model run"
+author: "Presley Kimball"
+date: "2024-06-27"
+output: html_document
+---
+
+## Set up
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(deSolve)
+library(RColorBrewer)
+library(pals)
+library(ggplot2)
+library(viridis)
+library(lhs)
+
+# set your working directory to be the overall file folder
+setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization")
+
+# set color palettes
+palette_4 <- brewer.pal(4, "Spectral") 
+palette_5 <- brewer.pal(5, "Spectral") 
+palette_6 <- brewer.pal(6, "Spectral") 
+```
+## Bringing in Texas Data
+```{r}
+# load in Texas data
+load("/data/TexasData/TX_pop_size.RData")
+load("/data/TexasData/TX_age_cat.RData")
+load("/data/TexasData/TX_sum.RData")
+
+# load rural data
+load("/data/TexasData/TX_rural_pop_size.RData")
+load("/data/TexasData/TX_rural_age_cat.RData")
+load("/data/TexasData/TX_rural_sum.RData")
+
+# load urban data
+load("/data/TexasData/TX_urban_pop_size.RData")
+load("/data/TexasData/TX_urban_age_cat.RData")
+load("/data/TexasData/TX_urban_sum.RData")
+```
+
+## Load in contact matrix and correct the format
+```{r}
+# Call in contact matrix
+K <- read_excel("/data/US_contact.xlsx")
+K <- as.matrix(K)
+# duplicate the first column (match other age groups)
+K <- cbind(K[,1],K[,1],K[,1],K[,1],K)
+K <- rbind(K[1,],K[1,],K[1,],K[1,],K)
+colnames(K) <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+                 "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+                 "60-65", "65-70", "70-75", "75+")
+rownames(K) <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+                 "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+                 "60-65", "65-70", "70-75", "75+")
+
+# transpose the matrix to match interpretation of main manuscript
+K <- t(K)
+
+# View contact matrix
+heatmap(K, Rowv=NA, Colv=NA, scale='none')
+```
+
+## Initializing age groups
+```{r}
+N0_ages <- c("0-1"= 20201362/5,
+            "1-2" = 20201362/5,
+            "2-3" = 20201362/5,
+            "3-4" = 20201362/5,
+            "4-5" = 20201362/5,
+            "5-10" = 20348657,
+            "10-15" = 20677194,
+            "15-20" = 22040343,
+            "20-25" = 21585999,
+            "25-30" = 21101849,
+            "30-35" = 19962099,
+            "35-40" = 20179642,
+            "40-45" = 20890964,
+            "45-50" = 22708591,
+            "50-55" = 22298125,
+            "55-60" = 19664805,
+            "60-65" = 16817924,
+            "65-70" = 12435263,
+            "70-75" = 9278166,
+            "75+" = 7317795+5743327+3620459+1448366+371244+53364)
+
+```
+
+## Setting Global Parameters
+```{r}
+# Set global variables. Note all rates are by week
+Lambda = c("0-1"=(385746/25145561)/365.25*7,"1-2" = 0,"2-3" = 0,"3-4" = 0,"4-5" = 0,
+           "5-10" = 0,"10-15" = 0,"15-20" = 0,"20-25" = 0,"25-30" = 0,"30-35" = 0,
+           "35-40" = 0,"40-45" = 0,"45-50" = 0,"50-55" = 0,"55-60" = 0,"60-65" = 0,
+           "65-70" = 0,"70-75" = 0,"75+" = 0)
+mu = (385746/25145561)/365.25*7
+ages <- c(0:4,seq(5,75,by=5))
+T <- length(ages)
+age_cats <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+              "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+              "60-65", "65-70", "70-75", "75+")
+m = 1/200*7
+gamma_vec = c(1/10,1/7,1/5,1/5)*7
+r_vec = c(1/(diff(ages)*365.25),0)*7
+rho_vec = c(1,0.75,0.51,0.51)
+sigma_vec = c(1,0.76,0.6,0.4)
+p_R = 1
+K = K
+h_1 = c((0.2*0.44*0.9/4+0.08*0.43*0.9/4+0.07*0.23*0.9/4+0.06*0.22*0.9/4*2),# 0-1
+        0.06*0.21*0.8,# 1-2
+        0.05*0.2*0.8,# 2-3
+        0.05*0.2*0.8,#3-4
+        0.05*0.2*0.8,#4-5
+        0.05*0.2*0.8,#5-10
+        rep(0.02*0.05,length(ages)-6)# above 5
+        )
+h_2 = 0.4*h_1
+h_3 = rep(0,length(ages))# set to zero, maybe close to 0 would be better
+nu_m <- (1/6)*(12*7/365.25)
+nu_b <- (1/5)*(12*7/365.25)
+iota_m <- 1-0.57
+iota_b <- 1-0.8
+```
+
+## General setup
+```{r}
+StateNames <- c('S0','S1','S2','S3','I1','I2','I3','I4','R','Vm','Vb')
+States <- array(NA, dim=c(length(ages), length(StateNames) )) 
+dimnames(States)[[1]] <- age_cats
+dimnames(States)[[2]] <- StateNames
+
+States_IC <- States
+
+States_IC[,c('S1','S2','S3','I2','I3','I4','R','Vm','Vb')]  = 0
+States_IC[,'S0'] = c(N0_ages[1:nrow(States_IC)])
+States_IC[,'I1'] = c(rep(10000,nrow(States_IC)))  #initializes with 10000 infected person per age group (This is since the N0_ages values are based on entire US population. We rescale down to population being simulated later. This allows for base endemic to occur.)
+
+# Scale total population size down to 1 (so that the population size is stable)
+# We are assuming that all locations have similar population distribution and 
+# thus are rescaled by the population in each location (done later)
+States_IC <- States_IC/sum(States_IC)
+
+# convert initial condition to a vector for ODE solver
+States_IC_vec <- as.vector(States_IC)
+names(States_IC_vec) <- paste(rep(rownames(States_IC),ncol(States_IC)),
+                              rep(colnames(States_IC),each = nrow(States_IC)), sep = " ")
+```
+## Tau vector function
+Function that calculates the tau vector based on two inputs:
+$$\tau = \tau_1*(\text{age_midpoints})+\tau_2$$ only for first five age_categories
+```{r}
+tau_vec <- function(tau_1,tau_2){
+  tau <- rep(1,length(age_cats))
+  for(i in 1:5){
+    tau[i] <- tau_1 * ((i-1)+0.5)+tau_2
+  }
+  return(tau)
+}
+```
+
+
+
+
+## Functions to run model and track hospitalizations
+```{r}
+source('source/SIR.R')
+source('source/Track_Hospitalizations.R')
+```
+
+## ODE solver of the model
+```{r}
+ODE_solve_SIR <- function(parms,States_IC_vec,burn_pd_yrs,lngth_soln_months){
+  times <- seq(0,(ceiling(365.25/7*burn_pd_yrs)+lngth_soln_months),by = 1)
+  solution <- ode(y=States_IC_vec, t=times,func=SIR, method = "ode45",
+                  parms=parms)
+  final_soln <- solution[(nrow(solution)-lngth_soln_months+1):nrow(solution),]
+  # Reset time-scale to match the timescale of the data
+  final_soln[,"time"] <- final_soln[,"time"]- min(final_soln[,"time"])
+  return(final_soln)
+}
+```
+
+## Functions for making plots
+```{r}
+source('source/Make_Plots.R')
+source('source/mean_sd.R')
+source('source/Error_Bar_Plots.R')
+source('source/Make_Urban_Rural_Plots.R')
+source('source/Urban_Rural_ErrorBarPlots.R')
+```
+
+
+## Overall Texas Plots
+```{r}
+load("output/TX_parms.RData")
+
+# Fix taus so there is no contact matrix amplification.
+TX_parms[[4]]$tau_1 <- 0
+TX_parms[[4]]$tau_2 <- 1
+
+# Fix the vaccination rates to 0
+TX_parms[[4]]$chi_m <- 0
+TX_parms[[4]]$chi_b <- 0
+
+# Make plots of the model and the Error bar plots of the prop of RSV across
+# age categories.
+Make_Plots(TX_parms[[4]],TX_pop_size,TX_sum,TX_age_cat, "Texas")
+ErrorBarPlots(TX_parms[[4]],TX_pop_size,500,0.95,TX_sum,TX_age_cat,"Texas")
+Urban_Rural_ErrorBarPlots(TX_parms[[4]],TX_urban_pop_size,TX_rural_pop_size,500,0.95,
+                          TX_urban_age_cat,TX_rural_age_cat,
+                          1.01,1.01/1.125,"Texas")
+```
+```{r}
+source('source/SIR.R')
+load("output/TX_parms.RData")
+
+# Fix taus so there is no contact matrix amplification.
+TX_parms[[4]]$tau_1 <- 0
+TX_parms[[4]]$tau_2 <- 1
+
+# Fix the vaccination rates to 0
+TX_parms[[4]]$chi_m <- 0
+TX_parms[[4]]$chi_b <- 0
+TX_parms[[4]]$step_function <- TRUE
+# Make plots of the model and the Error bar plots of the prop of RSV across
+# age categories.
+Make_Plots(TX_parms[[4]],TX_pop_size,TX_sum,TX_age_cat, "Texas")
+```
+
+## Comparing urban vs. rural age distribution by varying $\tau$
+
+```{r,eval=FALSE}
+load("output/TX_parms.RData")
+TX_final_parms <-  TX_parms[[4]]
+
+Make_Urban_Rural_Plots(1,1/1.125,TX_final_parms,TX_urban_pop_size,
+                                   TX_rural_pop_size,"Texas",TX_urban_age_cat,TX_rural_age_cat)
+
+Urban_Rural_ErrorBarPlots(TX_parms[[4]],TX_urban_pop_size,TX_rural_pop_size,
+                                      500,0.95,
+                                      TX_urban_age_cat,TX_rural_age_cat,
+                                      1.01,1.01/1.125,"Texas")
+```

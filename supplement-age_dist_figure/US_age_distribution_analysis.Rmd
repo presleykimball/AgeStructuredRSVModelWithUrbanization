@@ -1,0 +1,203 @@
+---
+title: "age_data_prep"
+author: "Presley Kimball"
+date: "2025-04-02"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModel/supplement-age_dist_figure")
+palette_4 <- brewer.pal(4, "Spectral") 
+```
+
+
+```{r}
+# save age categories used in main analysis
+age_cats <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+                 "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+                 "60-65", "65-70", "70-75", "75+")
+
+# load in data
+raw_age_data <- read.table("us.1969_2023.singleages.through89.90plus.adjusted.txt",header = F,sep = "\n")
+
+# only keep 2010 data
+age_data_2010 <- raw_age_data[substr(raw_age_data$V1, 1, 4) == "2010", ]
+rm(raw_age_data) # remove raw data for memory
+
+# make df
+age_data_2010 <- as.data.frame(age_data_2010)
+
+# make column data based on keys 
+start_index <- c(1,5,7,9,14,15,16,17,19)
+end_index <- c(start_index[2:length(start_index)]-1,26)
+cols <-lapply(1:length(start_index),function(i){substr(age_data_2010$age_data_2010,start_index[i],end_index[i])})
+rm(age_data_2010) # remove old data for memory
+age_data <- data.frame(cols)
+rm(cols) # remove old data for memory
+colnames(age_data) <- c('Year','State','StateFIPS','CountyFIPS','Race','Origin','Sex','Age_Group','Population')
+
+# clean a bit
+age_data$CountyFIPS <- trimws(age_data$CountyFIPS)
+age_data$Population <- as.numeric(age_data$Population)
+age_data$CountyFIPS <- as.numeric(age_data$CountyFIPS)
+age_data$StateFIPS <- as.numeric(age_data$StateFIPS)
+age_data$Age_Group <- as.numeric(age_data$Age_Group)
+age_data$Population <- as.numeric(age_data$Population)
+
+# get summary and only save summary
+age_data_2010_sum <- age_data %>%
+  group_by(Age_Group, StateFIPS, CountyFIPS) %>%
+  summarize(population = sum(Population), .groups = "drop")
+rm(age_data)
+
+# make age_cat variable to use same age cateogries
+age_data_2010_sum <- age_data_2010_sum %>%
+  mutate(age_cat_index = floor(Age_Group/5))
+
+age_data_2010_sum <- age_data_2010_sum %>%
+  mutate(age_cat = age_cats[age_cat_index+5])
+
+age_data_2010_sum$age_cat[is.na(age_data_2010_sum$age_cat)] <- "75+"
+
+wrong_labels <- which(age_data_2010_sum$age_cat_index ==0)
+
+for (i in 1:length(wrong_labels)){
+  age_data_2010_sum$age_cat[i] <- age_cats[age_data_2010_sum$Age_Group[i]+1]
+}
+
+
+age_data_2010_sum <- age_data_2010_sum %>%
+  group_by(age_cat, StateFIPS, CountyFIPS) %>%
+  summarize(population = sum(population), .groups = "drop")
+
+# remove excess data for space
+rm(list = c("start_index","wrong_labels","end_index"))
+```
+
+```{r}
+load("../../data/hosp_data_clean.RData")
+
+# ensure all same data type for merging
+age_data_2010_sum$StateFIPS <- as.numeric(age_data_2010_sum$StateFIPS)
+age_data_2010_sum$CountyFIPS <- as.numeric(age_data_2010_sum$CountyFIPS)
+hosp_data_clean$rsv.FIPS_State <- as.numeric(hosp_data_clean$rsv.FIPS_State)
+hosp_data_clean$rsv.FIPS_County <- as.numeric(hosp_data_clean$rsv.FIPS_County)
+
+# merge data with rsv hosp data
+merged_data <- merge(age_data_2010_sum, hosp_data_clean[,c('rsv.FIPS_State','rsv.FIPS_County','urban_cat')],
+                     by.x = c('StateFIPS','CountyFIPS'),
+                     by.y = c('rsv.FIPS_State','rsv.FIPS_County'))
+
+
+# group by urban cat and age cat for bar plot
+urban_strat <- merged_data %>%
+  group_by(urban_cat,age_cat) %>%
+  summarize(population = sum(population),.groups = "drop")
+
+# urban stratified data  and merged_data is all needed, so will throw out the rest for memory
+rm(list = c('age_data_2010_sum','hosp_data_clean'))
+```
+
+```{r}
+# make summary for bar plot
+tot_metro <- sum(urban_strat$population[urban_strat$urban_cat == 'Metro'])
+tot_micro <- sum(urban_strat$population[urban_strat$urban_cat == 'Micro'])
+tot_rural <- sum(urban_strat$population[urban_strat$urban_cat == 'Rural'])
+
+urban_strat$urban_prop <- NA
+urban_strat$urban_prop[urban_strat$urban_cat == 'Metro'] <- urban_strat$population[urban_strat$urban_cat == 'Metro']/tot_metro
+urban_strat$urban_prop[urban_strat$urban_cat == 'Micro'] <- urban_strat$population[urban_strat$urban_cat == 'Micro']/tot_micro
+urban_strat$urban_prop[urban_strat$urban_cat == 'Rural'] <- urban_strat$population[urban_strat$urban_cat == 'Rural']/tot_rural
+```
+
+```{r}
+urban_strat$age_cat <- factor(urban_strat$age_cat, levels = age_cats)
+urban_strat <- urban_strat[order(urban_strat$age_cat), ]
+
+ggplot(urban_strat, aes(x = age_cat, y = urban_prop, fill = urban_cat)) +
+  geom_bar(stat = "identity", position = "dodge") +  # position = "dodge" places bars side by side
+  labs(x = "Age Category", y = "Population Proportion", fill = "Urban Category")+
+  scale_fill_manual(values=c(palette_4[1],palette_4[3],palette_4[4]))+
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+merged_data$urban_prop <- NA
+
+urban_cats <- c('Metro','Micro','Rural')
+
+# need prop to be unique to each county
+state_fips <- unique(merged_data$StateFIPS)
+county_fips <- unique(merged_data$CountyFIPS)
+
+# calculate age distribution for each county stratified by urban cat
+for (state in state_fips){
+  for (county in county_fips){
+    if (any((merged_data$StateFIPS == state) &(merged_data$CountyFIPS ==county))){
+      df <- merged_data[(merged_data$StateFIPS == state) &(merged_data$CountyFIPS ==county),]
+        tot <- sum(df$population)
+        merged_data$urban_prop[(merged_data$StateFIPS == state) &
+                                 (merged_data$CountyFIPS ==county)] <- 
+          merged_data$population[(merged_data$StateFIPS == state) &
+                                   (merged_data$CountyFIPS ==county)]/tot
+    }
+  }
+}
+
+# create anova stats for first 6 age categories
+for( i in 1:6){
+  print(age_cats[i])
+  df <- merged_data[merged_data$age_cat == age_cats[i],]
+  result <- aov(urban_prop ~ urban_cat, data = df)
+  print(summary(result))
+}
+
+```
+```{r}
+merged_data$age_cat <- factor(merged_data$age_cat, levels = age_cats)
+merged_data <- merged_data[order(merged_data$age_cat), ]
+
+merged_data %>%
+  ggplot(aes(x=age_cat,y = urban_prop)) +
+  geom_boxplot(aes(fill = urban_cat),position = "dodge") +
+  scale_fill_manual(values=c(palette_4[1],palette_4[3],palette_4[4]))+
+  labs(x="Age Category",
+       y="Population proportion",,
+       fill = "Urban Cat.")+
+  theme(plot.background = element_blank(), 
+    panel.background = element_blank(), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5),
+    axis.line.y = element_line(color = "grey", size = 0.5),
+    legend.position = 'top',
+    legend.box.background = element_rect(color = "grey", size = 0.5))
+```
+
+```{r}
+merged_under_10 <- merged_data[merged_data$age_cat %in% age_cats[1:5],]
+age_dist_box_plot <- merged_under_10 %>%
+  ggplot(aes(x=age_cat,y = urban_prop)) +
+  geom_boxplot(aes(fill = urban_cat),position = "dodge") +
+  scale_fill_manual(values=c(palette_4[1],palette_4[3],palette_4[4]))+
+  labs(x="Age Category",
+       y="Population Proportion",,
+       fill = "Urban Cat.")+
+  theme(plot.background = element_blank(), 
+    panel.background = element_blank(), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5),
+    axis.line.y = element_line(color = "grey", size = 0.5),
+    legend.position = 'top',
+    legend.box.background = element_rect(color = "grey", size = 0.5))
+
+print(age_dist_box_plot)
+ggsave('../figures/supplement/under5_age_dist.pdf', plot = age_dist_box_plot,height = 4,width = 6,dpi =300)
+ggsave('../figures/supplement/under5_age_dist.png', plot = age_dist_box_plot,height = 4,width = 6,dpi =300)
+```
+

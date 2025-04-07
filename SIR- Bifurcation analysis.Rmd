@@ -1,0 +1,581 @@
+---
+title: "Bifurcations"
+author: "Presley Kimball"
+date: "2024-06-27"
+output: html_document
+---
+
+## Set up
+
+```{r}
+library(readxl)
+library(pals)
+library(tidyverse)
+library(dplyr)
+library(deSolve)
+library(RColorBrewer)
+library(ggplot2)
+library(viridis)
+library(lhs)
+
+# set your working directory to be the overall file folder
+setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization")
+
+# set color palettes
+palette_4 <- brewer.pal(4, "Spectral") 
+palette_5 <- brewer.pal(5, "Spectral") 
+palette_6 <- brewer.pal(6, "Spectral") 
+```
+## Bringing in Texas Data
+```{r}
+# load in Texas data
+load("/data/TexasData/TX_pop_size.RData")
+load("/data/TexasData/TX_age_cat.RData")
+load("/data/TexasData/TX_sum.RData")
+
+# # load rural data
+# load("/data/TexasData/TX_rural_pop_size.RData")
+# load("/data/TexasData/TX_rural_age_cat.RData")
+# load("/data/TexasData/TX_rural_sum.RData")
+# 
+# # load urban data
+# load("/data/TexasData/TX_urban_pop_size.RData")
+# load("/data/TexasData/TX_urban_age_cat.RData")
+# load("/data/TexasData/TX_urban_sum.RData")
+```
+
+## Load in contact matrix and correct the format
+```{r}
+# Call in contact matrix
+K <- read_excel("/data/US_contact.xlsx")
+K <- as.matrix(K)
+# duplicate the first column (match other age groups)
+K <- cbind(K[,1],K[,1],K[,1],K[,1],K)
+K <- rbind(K[1,],K[1,],K[1,],K[1,],K)
+colnames(K) <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+                 "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+                 "60-65", "65-70", "70-75", "75+")
+rownames(K) <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+                 "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+                 "60-65", "65-70", "70-75", "75+")
+
+# transpose the matrix to match interpretation of main manuscript
+K <- t(K)
+
+# View contact matrix
+heatmap(K, Rowv=NA, Colv=NA, scale='none')
+```
+
+## Initializing age groups
+We will use the general age distribution of the US census in 2010.
+\url{https://www.census.gov/content/dam/Census/library/publications/2011/dec/c2010br-03.pdf}
+```{r}
+N0_ages <- c("0-1"= 20201362/5,
+            "1-2" = 20201362/5,
+            "2-3" = 20201362/5,
+            "3-4" = 20201362/5,
+            "4-5" = 20201362/5,
+            "5-10" = 20348657,
+            "10-15" = 20677194,
+            "15-20" = 22040343,
+            "20-25" = 21585999,
+            "25-30" = 21101849,
+            "30-35" = 19962099,
+            "35-40" = 20179642,
+            "40-45" = 20890964,
+            "45-50" = 22708591,
+            "50-55" = 22298125,
+            "55-60" = 19664805,
+            "60-65" = 16817924,
+            "65-70" = 12435263,
+            "70-75" = 9278166,
+            "75+" = 7317795+5743327+3620459+1448366+371244+53364)
+
+```
+
+## Setting Global Parameters
+```{r}
+# Set global variables. Note all rates are by week
+Lambda = c("0-1"=(385746/25145561)/365.25*7,"1-2" = 0,"2-3" = 0,"3-4" = 0,"4-5" = 0,
+           "5-10" = 0,"10-15" = 0,"15-20" = 0,"20-25" = 0,"25-30" = 0,"30-35" = 0,
+           "35-40" = 0,"40-45" = 0,"45-50" = 0,"50-55" = 0,"55-60" = 0,"60-65" = 0,
+           "65-70" = 0,"70-75" = 0,"75+" = 0)
+mu = (385746/25145561)/365.25*7
+ages <- c(0:4,seq(5,75,by=5))
+T <- length(ages)
+age_cats <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+              "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+              "60-65", "65-70", "70-75", "75+")
+m = 1/200*7
+gamma_vec = c(1/10,1/7,1/5,1/5)*7
+r_vec = c(1/(diff(ages)*365.25),0)*7
+rho_vec = c(1,0.75,0.51,0.51)
+sigma_vec = c(1,0.76,0.6,0.4)
+p_R = 1
+K = K
+h_1 = c((0.2*0.44*0.9/4+0.08*0.43*0.9/4+0.07*0.23*0.9/4+0.06*0.22*0.9/4*2),# 0-1
+        0.06*0.21*0.8,# 1-2
+        0.05*0.2*0.8,# 2-3
+        0.05*0.2*0.8,#3-4
+        0.05*0.2*0.8,#4-5
+        0.05*0.2*0.8,#5-10
+        rep(0.02*0.05,length(ages)-6)# above 5
+        )
+h_2 = 0.4*h_1
+h_3 = rep(0,length(ages))# set to zero, maybe close to 0 would be better
+nu_m <- (1/6)*(12*7/365.25)
+nu_b <- (1/5)*(12*7/365.25)
+iota_m <- 1-0.57
+iota_b <- 1-0.8
+```
+
+## General setup
+```{r}
+StateNames <- c('S0','S1','S2','S3','I1','I2','I3','I4','R','Vm','Vb')
+States <- array(NA, dim=c(length(ages), length(StateNames) )) 
+dimnames(States)[[1]] <- age_cats
+dimnames(States)[[2]] <- StateNames
+
+States_IC <- States
+
+States_IC[,c('S1','S2','S3','I2','I3','I4','R','Vm','Vb')]  = 0
+States_IC[,'S0'] = c(N0_ages[1:nrow(States_IC)])
+States_IC[,'I1'] = c(rep(10000,nrow(States_IC)))  #initializes with 10000 infected person per age group (This is since the N0_ages values are based on entire US population. We rescale down to population being simulated later. This allows for base endemic to occur.)
+
+# Scale total population size down to 1 (so that the population size is stable)
+# We are assuming that all locations have similar population distribution and 
+# thus are rescaled by the population in each location (done later)
+States_IC <- States_IC/sum(States_IC)
+
+# convert initial condition to a vector for ODE solver
+States_IC_vec <- as.vector(States_IC)
+names(States_IC_vec) <- paste(rep(rownames(States_IC),ncol(States_IC)),
+                              rep(colnames(States_IC),each = nrow(States_IC)), sep = " ")
+```
+## Tau vector function
+Function that calculates the tau vector based on two inputs:
+$$\tau = \tau_1*(\text{age_midpoints})+\tau_2$$ only for first five age_categories
+```{r}
+tau_vec <- function(tau_1,tau_2){
+  tau <- rep(1,length(age_cats))
+  for(i in 1:5){
+    tau[i] <- tau_1 * ((i-1)+0.5)+tau_2
+  }
+  return(tau)
+}
+```
+
+
+
+
+## SIR model
+```{r}
+source('source/SIR.R')
+```
+
+## Tracking hospitalizations
+
+```{r}
+source('source/Track_Hospitalizations.R')
+```
+
+## ODE solver of the model
+```{r}
+ODE_solve_SIR <- function(parms,States_IC_vec,burn_pd_yrs,lngth_soln_months){
+  times <- seq(0,(ceiling(365.25/7*burn_pd_yrs)+lngth_soln_months),by = 1)
+  solution <- ode(y=States_IC_vec, t=times,func=SIR, method = "ode45",
+                  parms=parms)
+  final_soln <- solution[(nrow(solution)-lngth_soln_months+1):nrow(solution),]
+  # Reset time-scale to match the timescale of the data
+  final_soln[,"time"] <- final_soln[,"time"]- min(final_soln[,"time"])
+  return(final_soln)
+}
+```
+
+```{r,eval=FALSE}
+load("output/TX_parms.RData")
+
+parms <- TX_parms[[4]][1,]
+parms$chi_b <- 0
+parms$chi_m <- 0
+burn_pd <- 20
+  
+  parms$tau_1 <- 0
+  parms$tau_2 <- 1
+  parms$alpha_1 <- 0.3
+  parms$alpha_2 <- 0.1
+  
+  
+  # get solution using given parameters
+  solution <- ODE_solve_SIR(parms,States_IC_vec,burn_pd,522)
+  
+  
+  #### SHANNON'S ENTROPY INTENSITY CALCULATION ####
+  # get only infected data from the solution
+  I_indices <- grep("I",colnames(solution))
+  Infected <- rowSums(solution[,I_indices] )
+  
+  pdf_avg <- rep(NA, 52)
+  indices <- (0:9)*52
+  for (i in 1:52){
+    pdf_avg[i] <- mean(Infected[indices+i])
+  }
+  pdf_avg <- pdf_avg/sum(pdf_avg)
+  pdf_avg <- pdf_avg[pdf_avg != 0]
+  Intensity <- 1- (1*sum(pdf_avg*log(pdf_avg)))/(52*sum(1/52*log(1/52)))
+  print(Intensity)
+```
+
+
+
+## Bifucation function
+```{r}
+Bifurcation_outputs <- function(parms,tau_1,tau_2,alpha_1,alpha_2){
+  burn_pd <- 20
+  
+  parms$tau_1 <- tau_1
+  parms$tau_2 <- tau_2
+  parms$alpha_1 <- alpha_1
+  parms$alpha_2 <- alpha_2
+  
+  
+  # get solution using given parameters
+  solution <- ODE_solve_SIR(parms,States_IC_vec,burn_pd,522)
+  
+  
+  #### SHANNON'S ENTROPY INTENSITY CALCULATION ####
+  # get only infected data from the solution
+  I_indices <- grep("I",colnames(solution))
+  Infected <- rowSums(solution[,I_indices] )
+  
+  pdf_avg <- rep(NA, 52)
+  indices <- (0:9)*52
+  for (i in 1:52){
+    pdf_avg[i] <- mean(Infected[indices+i])
+  }
+  pdf_avg <- pdf_avg/sum(pdf_avg)
+  pdf_avg <- pdf_avg[pdf_avg != 0]
+  Intensity <- 1- (1*sum(pdf_avg*log(pdf_avg)))/(52*sum(1/52*log(1/52)))
+  
+ #### PERIODICITY CALCULATION ####
+  Infected <- as.data.frame(Infected)
+  Infected$time <- 1:522
+  
+  maxes <- numeric(10)
+  for(i in 1:10){
+    times <- 1:52+(i-1)*52
+    current_infected <- Infected[times,]
+    maxes[i] <- max(current_infected$Infected)
+  }
+  rounded_maxes <- round(maxes,4)
+  
+  Unique_maxes <- unique(rounded_maxes)
+  if(max(Unique_maxes)>0){
+    ratio <- min(Unique_maxes)/max(Unique_maxes)
+    if(ratio >= (1/1.1)){
+      periodicity_10 <- 1
+    } else{
+      max_median <- median(rounded_maxes)
+      below_median <- rounded_maxes[rounded_maxes<= max_median]
+      above_median <- rounded_maxes[rounded_maxes>= max_median]
+      if(max(below_median)==0){
+        below_10 = TRUE
+      } else {
+        ratio <- min(below_median)/max(below_median)
+        below_10 = (ratio >= 1/1.1)
+      }
+      if(min(above_median)==0){
+        above_10 = FALSE
+      } else {
+        ratio <- min(above_median)/max(above_median)
+        above_10 = (ratio >= 1/1.1)
+      }
+      if(below_10 == TRUE & above_10 == TRUE){
+        periodicity_10 <- 2
+      } else {
+        periodicity_10 <- length(Unique_maxes)
+      }
+    }
+    ratio <- min(Unique_maxes)/max(Unique_maxes)
+    if(ratio >= (1/1.05)){
+      periodicity_05 <- 1
+    } else{
+      max_median <- median(rounded_maxes)
+      below_median <- rounded_maxes[rounded_maxes<= max_median]
+      above_median <- rounded_maxes[rounded_maxes>= max_median]
+      if(max(below_median)==0){
+        below_05 = TRUE
+      } else {
+        ratio <- min(below_median)/max(below_median)
+        below_05 = (ratio >= 1/1.05)
+      }
+      if(min(above_median)==0){
+        above_05 = FALSE
+      } else {
+        ratio <- min(above_median)/max(above_median)
+        above_05 = (ratio >= 1/1.05)
+      }
+      if(below_05 == TRUE & above_05 == TRUE){
+        periodicity_05 <- 2
+      } else {
+        periodicity_05 <- length(Unique_maxes)
+      }
+    }
+    ratio <- min(Unique_maxes)/max(Unique_maxes)
+    if(ratio >= (1/1.025)){
+      periodicity_025 <- 1
+    } else{
+      max_median <- median(rounded_maxes)
+      below_median <- rounded_maxes[rounded_maxes<= max_median]
+      above_median <- rounded_maxes[rounded_maxes>= max_median]
+      if(max(below_median)==0){
+        below_025 = TRUE
+      } else {
+        ratio <- min(below_median)/max(below_median)
+        below_025 = (ratio >= 1/1.025)
+      }
+      if(min(above_median)==0){
+        above_025 = FALSE
+      } else {
+        ratio <- min(above_median)/max(above_median)
+        above_025 = (ratio >= 1/1.025)
+      }
+      if(below_025 == TRUE & above_025 == TRUE){
+        periodicity_025 <- 2
+      } else {
+        periodicity_025 <- length(Unique_maxes)
+      }
+    }
+  } else {
+    periodicity_10 <- 0
+    periodicity_05 <- 0
+    periodicity_025 <- 0
+  }
+  
+  #### prop0_1 calculation ####
+  All_infected <- solution[,I_indices]
+  infected_prop <- numeric(length(age_cats))
+  for(i in 1:length(age_cats)){
+    current_infected <- All_infected[,grep(paste(age_cats[i]," ",sep=""),
+                                           colnames(All_infected))]
+    infected_prop[i] <- sum(current_infected)
+  }
+  
+  infected_prop <- infected_prop/sum(infected_prop)
+  
+  prop0_1 <- infected_prop[1]
+  
+  
+  #### AVG SEASONALITY LENGTH CALCULATION ####
+  max_times <- numeric(10)
+  for(i in 1:10){
+    times <- 1:52+(i-1)*52
+    current_infected <- Infected[times,]
+    current_infected <- current_infected[order(current_infected$Infected,
+                                               decreasing = TRUE),]
+    max_times[i] <- current_infected$time[1]
+  }
+  
+  avg_szn <- mean(diff(max_times))
+  
+  results <- list(Intensity,periodicity_10,periodicity_05,periodicity_025,prop0_1,avg_szn)
+  return(results)
+}
+```
+
+
+```{r}
+load("output/TX_parms.RData")
+
+Texas_best_parms <- TX_parms[[4]][1,]
+Texas_best_parms$chi_b <- 0
+Texas_best_parms$chi_m <- 0
+trial <- Bifurcation_outputs(Texas_best_parms,0,1.25,0.35,0.04)
+```
+
+
+want to make for alpha_1 and alpha_2, alpha_2 and tau_2 (tau_1 = 0)
+```{r}
+alpha_1 <- seq(round(Texas_best_parms$alpha_1,3)-0.3,
+               round(Texas_best_parms$alpha_1,3)+0.3,0.005)
+alpha_2 <- seq(round(Texas_best_parms$alpha_2,4)-0.1,
+               round(Texas_best_parms$alpha_2,4)+0.1,0.002)
+tau_2 <- seq(0.65,1.35,0.005)
+parm_set <- expand.grid(alpha_1= alpha_1,alpha_2= alpha_2)
+parm_set$tau_2 <- 1
+add_parm_set <- expand.grid(alpha_2= alpha_2,tau_2 = tau_2)
+add_parm_set$alpha_1 <- Texas_best_parms$alpha_1
+add2_parm_set <- expand.grid(alpha_1 = alpha_1, tau_2 = tau_2)
+add2_parm_set$alpha_2 <- Texas_best_parms$alpha_2
+parm_set <- rbind(add_parm_set,add2_parm_set)
+
+
+# fix all other values.
+parm_set$alpha_3 <- Texas_best_parms$alpha_3
+parm_set$q_1 <- Texas_best_parms$q_1
+parm_set$q_2 <- Texas_best_parms$q_2
+parm_set$q_3 <- Texas_best_parms$q_3
+parm_set$q_4 <- Texas_best_parms$q_4
+parm_set$q_5 <- Texas_best_parms$q_5
+parm_set$q_6 <- Texas_best_parms$q_6
+parm_set$chi_m <- 0
+parm_set$chi_b <- 0
+
+parm_set$Intensity <- NA
+parm_set$periodicity_10 <- NA
+parm_set$periodicity_05 <- NA
+parm_set$periodicity_025 <- NA
+parm_set$prop0_1 <- NA
+parm_set$avg_szn <- NA
+```
+
+```{r}
+start = 1
+for(i in  start:nrow(parm_set)){
+  output <- Bifurcation_outputs(Texas_best_parms,0,parm_set$tau_2[i],parm_set$alpha_1[i],parm_set$alpha_2[i])
+  parm_set$Intensity[i] <- output[[1]]
+  parm_set$periodicity_10[i] <- output[[2]]
+  parm_set$periodicity_05[i] <- output[[3]]
+  parm_set$periodicity_025[i] <- output[[4]]
+  parm_set$prop0_1[i] <- output[[5]]
+  parm_set$avg_szn[i] <- output[[6]]
+}
+
+ save(parm_set,file = "output/bifurcationdata.RData")
+```
+
+```{r}
+load("output/bifurcationdata.RData")
+chaos <- function(value){
+  if (value >= 3){
+    return(3)
+  } else{
+    return(value)
+  }
+}
+parm_set <- parm_set %>% 
+  mutate(chaos_measure = sapply(periodicity_05, chaos))
+  palette_11 <- brewer.pal(11, "Spectral") 
+library(fields)
+
+alpha_1 <- seq(round(Texas_best_parms$alpha_1,3)-0.3,
+               round(Texas_best_parms$alpha_1,3)+0.3,0.005)
+alpha_2 <- seq(round(Texas_best_parms$alpha_2,3)-0.1,
+               round(Texas_best_parms$alpha_2,3)+0.1,0.002)
+tau_2 <- seq(0.65,1.35,0.005)
+plot_names <- c("Intensity","prop0_1")
+legend_names <- c("Intensity","Under 1 Hospitalization Proportion")
+file_names <- c("figures/fig3/C_i","figures/fig3/C_ii")
+for (k in 1: length(plot_names)){
+  plotname <- plot_names[k]
+  # unpack into matrix
+  mat <-matrix(ncol = length(tau_2), nrow = length(alpha_2))
+  colnames(mat) <- tau_2
+  rownames(mat) <- alpha_2
+  for (j in 1:length(tau_2)){
+    for (i in 1:length(alpha_2)){
+      mat[i,j] <- parm_set[[plotname]][length(alpha_2)*(j-1)+i]
+    }
+  }
+  png(paste0(file_names[k],'.png'),height =3.5, width = 4.5,units = "in", res =300)
+  # pdf(paste0(file_names[k],'.pdf'),height =3.5, width = 4.5)
+  par(mar = c(3.5, 3, 1, 1.5), mgp = c(1.6, 1.2, 0))
+  image.plot(t(mat),
+        xlab = 'Rel. Urban Contact Rate',
+          ylab = 'Seasonal Forcing',
+        col=coolwarm(20),
+        legend.lab=legend_names[k],
+        axes = F,
+        legend.line = 2.5)
+  axis(2,at=seq(0,1, length=length(alpha_2)), labels = round(alpha_2,2),tick = F,line = -0.7)
+  axis(1,at=seq(0,1, length=length(tau_2)), labels = tau_2,tick = F,line = -0.7)
+  dev.off()
+}
+
+alpha_1 <- seq(round(Texas_best_parms$alpha_1,3)-0.3,
+               round(Texas_best_parms$alpha_1,3)+0.3,0.005)
+alpha_2 <- seq(round(Texas_best_parms$alpha_2,4)-0.1,
+               round(Texas_best_parms$alpha_2,4)+0.1,0.002)
+tau_2 <- seq(0.65,1.35,0.005)
+plot_names <- c("Intensity","prop0_1")
+legend_names <- c("Intensity","Under 1 Hospitalization Proportion")
+file_names <- c("figures/fig3/C_iii","figures/fig3/C_iv")
+for (k in 1: length(plot_names)){
+  plotname <- plot_names[k]
+  # unpack into matrix
+  mat <-matrix(ncol = length(tau_2), nrow = length(alpha_1))
+  colnames(mat) <- tau_2
+  rownames(mat) <- alpha_1
+  for (j in 1:length(tau_2)){
+    for (i in 1:length(alpha_1)){
+      mat[i,j] <- parm_set[[plotname]][length(alpha_1)*(j-1)+i+length(alpha_2)*length(tau_2)]
+    }
+  }
+  png(paste0(file_names[k],'.png'),height =3.5, width = 4.5,units = "in", res =300)
+  par(mar = c(3.5, 3, 1, 1.5), mgp = c(1.6, 1.2, 0))
+  image.plot(t(mat),
+        xlab = 'Rel. Urban Contact Rate',
+        ylab = 'Mean Transmission Rate',
+        col=coolwarm(20),
+        legend.lab=legend_names[k],
+        axes = F,
+        legend.line = 2.5)
+  axis(2,at=seq(0,1, length=length(alpha_1)), labels = round(alpha_1,2),tick = F,line = -0.7)
+  axis(1,at=seq(0,1, length=length(tau_2)), labels = tau_2,tick = F,line = -0.7)
+  dev.off()
+}
+
+```
+
+# example plots
+```{r}
+load("output/TX_parms.RData")
+
+# Fix taus so there is no contact matrix amplification.
+TX_parms[[4]]$tau_1 <- 0
+TX_parms[[4]]$tau_2 <- 1
+
+# Fix the vaccination rates to 0
+TX_parms[[4]]$chi_m <- 0
+TX_parms[[4]]$chi_b <- 0
+
+# Make plots of the model and the Error bar plots of the prop of RSV across
+# age categories.
+param_set <- TX_parms[[4]]
+param_set <- param_set[order(param_set$Loss, decreasing = FALSE),]
+  parms <- as.list(param_set[1,]) # take only the best parameter set
+  print(parms) 
+for (i in 1:20){
+  parms$alpha_2 <- parms$alpha_2-0.005
+  # Get solution using best params
+  solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
+  
+  # Get hospitalization data from solution
+  hospitalizations <- Track_Hospitalizations(solution = solution,parms = parms)
+  
+  # Rescale timescales to start weeks at 0
+  solution[,1] <- solution[,1]- min(solution[,1])
+  hospitalizations[,1]<- hospitalizations[,1]-min(hospitalizations[,1])
+
+  plot(hospitalizations[,1],rowSums(hospitalizations[,2:ncol(hospitalizations)]),col='black',lwd =2, type ='l', main = paste(parms$alpha_2))
+}
+
+```
+
+
+```{r}
+parms <- parm_set[parm_set$periodicity_025== 2,][1]
+parms$tau_1 <- 0
+parms$tau_2 <- 1
+solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
+  
+  # Get hospitalization data from solution
+  hospitalizations <- Track_Hospitalizations(solution = solution,parms = parms)
+  
+  # Rescale timescales to start weeks at 0
+  solution[,1] <- solution[,1]- min(solution[,1])
+  hospitalizations[,1]<- hospitalizations[,1]-min(hospitalizations[,1])
+
+  plot(hospitalizations[,1],rowSums(hospitalizations[,2:ncol(hospitalizations)]),col='black',lwd =2, type ='l', main = paste(parms$alpha_2))
+```
+

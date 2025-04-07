@@ -1,0 +1,1097 @@
+---
+title: "Fitting curves"
+author: "Presley Kimball"
+date: "2024-05-24"
+output: html_document
+---
+
+## Initialize packages and data
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+require("haven")
+require("doBy")
+library(minpack.lm)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
+library("viridis") 
+library(tigris)
+library(tmap)
+library(sf) 
+library(dotwhisker)
+library(gapminder)
+library(maps)
+library(broom)
+library(gridExtra)
+library("gridBase")
+library("gridGraphics")
+library(cowplot)
+library(stargazer)
+```
+
+
+```{r}
+palette_4 <- brewer.pal(4, "Spectral") 
+palette_5 <- brewer.pal(5, "Spectral") 
+gradient_palette <- "Spectral"
+```
+
+## Load in clean data
+```{r}
+setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization")
+# these files are protected and cannot be posted to git hub. Put data folder
+# in exterior folder to repository.
+load("data/hosp_data_clean.RData")
+load("data/param_dat_sum.RData")
+```
+
+
+## Age Analysis
+```{r}
+counts_by_age <- dat_sum %>%
+  group_by(age_midpoint) %>%
+  summarise(total_count = sum(rsv.sum))
+
+age_counts <- counts_by_age %>% 
+  ggplot(aes(x=age_midpoint, y=total_count)) + 
+  geom_bar(stat = "identity")+
+  labs(x = "Age Midpoint", y = "Count")
+
+under20_age_counts <- counts_by_age[counts_by_age$age_midpoint<20,] %>% 
+  ggplot(aes(x=age_midpoint, y=total_count)) + 
+  geom_bar(stat = "identity")+
+  labs(x = "Age Midpoint", y = "Count")
+
+
+# attach pop density and urban_cat s to dat_sum
+dat_sum$pop_density <- numeric(nrow(dat_sum))
+dat_sum$urban_cat <- numeric(nrow(dat_sum))
+dat_sum$urban_rural <- numeric(nrow(dat_sum))
+for (i in 1:nrow(dat_sum)) {
+  dat_sum$pop_density[i] <-
+    hosp_data_clean$pop_density[hosp_data_clean$Hosptco==dat_sum$HOSPSTCO[i]]
+  dat_sum$urban_cat[i] <-
+    hosp_data_clean$urban_cat[hosp_data_clean$Hosptco==dat_sum$HOSPSTCO[i]]
+  dat_sum$urban_rural[i] <-
+    hosp_data_clean$urban_rural[hosp_data_clean$Hosptco==dat_sum$HOSPSTCO[i]]
+}
+```
+
+
+## Subset under 10 and under 20
+Take just the ages under 20,10 for fitting. This stops overfitting of older ages (since all around 0).
+
+Create subset for under20 and under10 and then plot again
+```{r}
+# create subset of only younger age groups.
+dat_sum_under20 <- dat_sum[dat_sum$age_midpoint<20,]
+dat_sum_under10 <- dat_sum[dat_sum$age_midpoint<10,]
+
+#plot this subset
+for(i in 1:5){
+  # create subset of current hospital
+  sub <- dat_sum_under20[dat_sum_under20$HOSPSTCO==hosp_data_clean$Hosptco[i],]
+    # plot the proportions
+    plot(sub$age_midpoint, sub$rsv_proportion, main = hosp_data_clean$Hosptco[i],
+         col = ifelse(sub$rsv_proportion == 0, "red", "blue"),pch = 19)
+}
+```
+
+
+## Find non-conforming data (OK)
+There exists some data which the second age group has a higher RSV proportion than the first. Let us investigate this data.
+```{r}
+subset_0.5 <- dat_sum_under20[dat_sum_under20$age_midpoint==0.5,]
+subset_1.5 <- dat_sum_under20[dat_sum_under20$age_midpoint==1.5,]
+
+hosp_data_clean$rsv_0.5 <- numeric(nrow(hosp_data_clean))
+hosp_data_clean$rsv_1.5 <- numeric(nrow(hosp_data_clean))
+
+for (i in 1:nrow(hosp_data_clean)){
+  hosp_data_clean$rsv_0.5[i] <- subset_0.5$rsv_proportion[subset_0.5$HOSPSTCO==hosp_data_clean$Hosptco[i]]
+  hosp_data_clean$rsv_1.5[i] <- subset_1.5$rsv_proportion[subset_1.5$HOSPSTCO==hosp_data_clean$Hosptco[i]]
+}
+
+bad_hosp_data <- hosp_data_clean[hosp_data_clean$rsv_0.5<hosp_data_clean$rsv_1.5,]
+hosp_data_clean <- subset(hosp_data_clean, select = - rsv_1.5)
+hosp_data_clean <- subset(hosp_data_clean, select = - rsv_0.5)
+print(bad_hosp_data$rsv.HOSPST)
+```
+We found that the non-conforming data all comes from OK. We will assume that this is mainly due to some reporting practice in that state and thus remove OK for all future analyses.
+```{r}
+hosp_data_nobump <- hosp_data_clean[!(hosp_data_clean$rsv.HOSPST == "OK"),] 
+dat_sum_under20_nobump <- subset(dat_sum_under20, (HOSPSTCO %in% hosp_data_nobump$Hosptco))
+dat_sum_under10_nobump <- subset(dat_sum_under10, (HOSPSTCO %in% hosp_data_nobump$Hosptco))
+```
+
+## Statistical tests for differneces in urban vs rural- RSV proportion
+First we will do ANOVA tests
+- Test if RSV proportion has statistically significant differences for each age group among urban categories
+- Let $\mu^{\text{age}}_{\text{cat}}$ be the mean rsv proportion of a given age group and urban category
+- We will test for significant differences for RSV_proportions under 10 and under 20 to determine which subset to use. We find that the differences are only gauranteed to be significant for those ages under 10, and thus will use the under 10 subset for the duration of this study.
+
+$$H_0: \mu^{\text{age}}_{\text{Metro}}=\mu^{\text{age}}_{\text{Micro}}=\mu^{\text{age}}_{\text{Rural}}$$
+
+$$H_1: \text{at least one mean is different.}$$
+Run QQ-plots to make sure test assumptions are met.
+```{r}
+unique_ages = unique(dat_sum_under20_nobump$age_midpoint)
+
+for (i in 1:length(unique_ages)) {
+  current_age = unique_ages[i]
+  sub_metro <- dat_sum_under20_nobump[dat_sum_under20_nobump$age_midpoint == current_age &
+                                        dat_sum_under20_nobump$urban_cat =="Metro",]
+  sub_micro <- dat_sum_under20_nobump[dat_sum_under20_nobump$age_midpoint == current_age &
+                                        dat_sum_under20_nobump$urban_cat =="Micro",]
+  sub_rural <- dat_sum_under20_nobump[dat_sum_under20_nobump$age_midpoint == current_age &
+                                        dat_sum_under20_nobump$urban_cat =="Rural",]
+  qqnorm(sub_metro$rsv_proportion, pch = 1, frame = FALSE,main = paste("Metro, age =",current_age))
+  qqline(sub_metro$rsv_proportion, col = "steelblue", lwd = 2)
+  qqnorm(sub_micro$rsv_proportion, pch = 1, frame = FALSE,main = paste("Micro, age =",current_age))
+  qqline(sub_micro$rsv_proportion, col = "steelblue", lwd = 2)
+  qqnorm(sub_rural$rsv_proportion, pch = 1, frame = FALSE,main = paste("Rural, age =",current_age))
+  qqline(sub_rural$rsv_proportion, col = "steelblue", lwd = 2)
+}
+
+```
+These qqplots are generally bad for ages higher than 3.5, and the metro category always looks poor. However, should be fine to run statistical tests.
+
+General statistics:
+```{r}
+for (i in 1:length(unique_ages)) {
+  current_age = unique_ages[i]
+  sub <- dat_sum_under20_nobump[dat_sum_under20_nobump$age_midpoint == current_age,]
+  summary_stat<-sub %>%
+    group_by(urban_cat) %>%
+    summarise(
+      mean = mean(rsv_proportion),
+      sd = sd(rsv_proportion)
+      )
+  colnames(summary_stat) <- c(current_age,"mean","sd")
+  print(summary_stat)
+}
+
+
+```
+
+Can see some difference in the means until older ages again. Thus, ANOVA test makes sense.
+
+ANOVA for under 10.
+```{r}
+unique_ages = unique(dat_sum_under10_nobump$age_midpoint)
+for (i in 1:length(unique_ages)) {
+  current_age = unique_ages[i]
+  sub <- dat_sum_under10_nobump[dat_sum_under10_nobump$age_midpoint == current_age,]
+  Anova_result <- aov(rsv_proportion ~ urban_cat, data = sub)
+  print(current_age)
+  print(summary(Anova_result))
+  print(TukeyHSD(Anova_result))
+}
+```
+
+> We see somethings similar here. Under 4.5, all groups are statistically significant. At 4.5, none are different. However, after 4.5 we see that both metro and micro are statistically significant from rural. That is interesting since it may indicate that there are strong distinctions between rural and other groups majority of the time.
+
+
+## Functions for fitting by non-linear least squares (nls) for age_midpoint
+List of functions
+```{r}
+tabl <- "
+| name   | function |
+|--------|----------|
+| model1 | a e^{-bx} |
+| model2 | k/(x^2)  |
+| model3 | a x^{-b} |
+| model4 | k e^{-kx}|
+"
+cat(tabl) # output
+```
+
+Functions for fitting
+```{r}
+model1_fit <- function(hospital_df,data_df,taga,tagb,tagerror,tagMSE){
+  hospital_df[[taga]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagb]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagerror]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagMSE]] <- numeric(nrow(hospital_df))
+  for (i in 1:nrow(hospital_df)){
+    sub <- data_df[data_df$HOSPSTCO==hospital_df$Hosptco[i],] 
+    x <- sub$age_midpoint
+    y <- sub$rsv_proportion
+    
+    # fit to y = a*e^(-bx) 
+    start_values <- c(a=1, b=1)
+    fit <- nls(y ~ a * exp(-b * x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    hospital_df[[taga]][i] <- fit_coef["a"]
+    hospital_df[[tagb]][i] <- fit_coef["b"]
+    hospital_df[[tagerror]][i] <- sum(residuals(fit)^2)
+    hospital_df[[tagMSE]][i] <- mean(residuals(fit)^2)
+  }
+  return(hospital_df)
+}
+
+
+
+model2_fit <- function(hospital_df,data_df,tagk,tagerror,tagMSE){
+  hospital_df[[tagk]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagerror]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagMSE]] <- numeric(nrow(hospital_df))
+  for (i in 1:nrow(hospital_df)){
+    sub <- data_df[data_df$HOSPSTCO==hospital_df$Hosptco[i],] 
+    x <- sub$age_midpoint
+    y <- sub$rsv_proportion
+    
+    # fit to y = k/x^2
+    start_values <- c(k=1)
+    fit <- nls(y ~ k/(x^2),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    hospital_df[[tagk]][i] <- fit_coef["k"]
+    hospital_df[[tagerror]][i] <- sum(residuals(fit)^2)
+    hospital_df[[tagMSE]][i] <- mean(residuals(fit)^2)
+  }
+  return(hospital_df)
+}
+
+model3_fit <- function(hospital_df,data_df,taga,tagb,tagerror,tagMSE){
+  hospital_df[[taga]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagb]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagerror]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagMSE]] <- numeric(nrow(hospital_df))
+  for (i in 1:nrow(hospital_df)){
+    sub <- data_df[data_df$HOSPSTCO==hospital_df$Hosptco[i],] 
+    x <- sub$age_midpoint
+    y <- sub$rsv_proportion
+    
+    # fit to y = a*x^(-b) 
+    start_values <- c(a=1, b=2)
+    fit <- nls(y ~ a*x^(-b),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    hospital_df[[taga]][i] <- fit_coef["a"]
+    hospital_df[[tagb]][i] <- fit_coef["b"]
+    hospital_df[[tagerror]][i] <- sum(residuals(fit)^2)
+    hospital_df[[tagMSE]][i] <- mean(residuals(fit)^2)
+  }
+  return(hospital_df)
+}
+
+model4_fit <- function(hospital_df,data_df,tagk,tagerror,tagMSE){
+  hospital_df[[tagk]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagerror]] <- numeric(nrow(hospital_df))
+  hospital_df[[tagMSE]] <- numeric(nrow(hospital_df))
+  for (i in 1:nrow(hospital_df)){
+    sub <- data_df[data_df$HOSPSTCO==hospital_df$Hosptco[i],] 
+    x <- sub$age_midpoint
+    y <- sub$rsv_proportion
+    
+    # fit to y = ke^(-kx)
+    start_values <- c(k=1.5)
+    fit <- nls(y ~ k*exp(-k*x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 5000))
+    fit_coef <- coef(fit)
+    hospital_df[[tagk]][i] <- fit_coef["k"]
+    hospital_df[[tagerror]][i] <- sum(residuals(fit)^2)
+    hospital_df[[tagMSE]][i] <- mean(residuals(fit)^2)
+  }
+  return(hospital_df)
+}
+
+```
+
+Fitting to data using functions
+```{r}
+#fit on data under 10
+hosp_data_nobump<-model1_fit(hosp_data_nobump,dat_sum_under10_nobump,"und10_model1_a",
+                            "und10_model1_b","und10_model1_sumerror","und10_model1_MSE")
+hosp_data_nobump<-model2_fit(hosp_data_nobump,dat_sum_under10_nobump,"und10_model2_k",
+                            "und10_model2_sumerror","und10_model2_MSE")
+hosp_data_nobump<-model3_fit(hosp_data_nobump,dat_sum_under10_nobump,"und10_model3_a",
+                            "und10_model3_b","und10_model3_sumerror","und10_model3_MSE")
+hosp_data_nobump<-model4_fit(hosp_data_nobump,dat_sum_under10_nobump,"und10_model4_k",
+                            "und10_model4_sumerror","und10_model4_MSE")
+hosp_data_nobump[hosp_data_nobump$und10_model4_k<4,]
+```
+
+## Plots of nls fits for under 10
+
+Plot any fit
+```{r}
+# create domain for plot
+ages <- seq(0, 10, length.out = 100) 
+
+for (i in 1:10){
+  current_code <- hosp_data_nobump$Hosptco[i]
+  model1_predict <- hosp_data_nobump$und10_model1_a[i] * exp( -hosp_data_nobump$und10_model1_b[i] * ages)
+  model2_predict <- hosp_data_nobump$und10_model2_k[i]/(ages^2)
+  model3_predict <- hosp_data_nobump$und10_model3_a[i]*ages^(-hosp_data_nobump$und10_model3_b[i])
+  model4_predict <- hosp_data_nobump$und10_model4_k[i] * exp(-hosp_data_nobump$und10_model4_k[i] * ages)
+  sub <- dat_sum_under10[dat_sum_under10$HOSPSTCO == current_code,]
+
+  plot(sub$age_midpoint,sub$rsv_proportion, main = current_code, col = 'black',
+       pch =19,cex=1.5, xlab = "Age",ylab = "Proportion of Cases")
+  lines(ages,model1_predict, col=palette_4[1],lwd =2)
+  lines(ages,model2_predict, col=palette_4[2],lwd =2)
+  lines(ages,model3_predict, col=palette_4[3],lwd =2)
+  lines(ages,model4_predict, col=palette_4[4],lwd =2)
+  points(sub$age_midpoint,sub$rsv_proportion,col = 'black',pch =19,cex=1.5)
+  legend("topright",
+         legend = c("data","ae^(-bx)","k/x^2","ax^(-b)","ke^(-kx))"),
+         col=c('black',palette_4[1],
+               palette_4[2],palette_4[3],palette_4[4]),lty = 1,lwd=c(2,2,2,2,2))
+}
+```
+
+```{r}
+ages <- seq(0, 10, length.out = 100) 
+Counties <- c("New York", "Cook","Denver", "Philadelphia")
+
+make_county_plot <- function(i){
+current_county <- Counties[i]
+
+  current_code <- hosp_data_nobump$Hosptco[hosp_data_nobump$county == current_county]
+  model1_predict <- hosp_data_nobump$und10_model1_a[i] * exp( -hosp_data_nobump$und10_model1_b[i] * ages)
+  model2_predict <- hosp_data_nobump$und10_model2_k[i]/(ages^2)
+  model3_predict <- hosp_data_nobump$und10_model3_a[i]*ages^(-hosp_data_nobump$und10_model3_b[i])
+  model4_predict <- hosp_data_nobump$und10_model4_k[i] * exp(-hosp_data_nobump$und10_model4_k[i] * ages)
+  sub <- dat_sum_under10[dat_sum_under10$HOSPSTCO == current_code,]
+  par(mar = c(3, 4.1, 2.1, 0.5),las = 1)
+  plot(sub$age_midpoint,sub$rsv_proportion, 
+       col = 'black',pch =19,cex=0.8, xlab = " ",ylab = "Prop. of Cases")
+  title(main =paste(current_county,
+                    hosp_data_nobump$rsv.HOSPST[hosp_data_nobump$Hosptco == 
+                                                  current_code],sep = ", "),line = 0.6)
+  mtext("Age", side = 1, line = 2)
+  lines(ages,model1_predict, col=palette_4[1],lwd =2)
+  lines(ages,model2_predict, col=palette_4[2],lwd =2)
+  lines(ages,model3_predict, col=palette_4[3],lwd =2)
+  lines(ages,model4_predict, col=palette_4[4],lwd =2)
+  points(sub$age_midpoint,sub$rsv_proportion,col = 'black',pch =19,cex=1)
+}
+
+current_county <- Counties[3]
+
+  current_code <- hosp_data_nobump$Hosptco[hosp_data_nobump$county == current_county]
+  sub <- dat_sum_under10[dat_sum_under10$HOSPSTCO == current_code,]
+  par(mar = c(3, 4.1, 2.1, 0.5),las = 1)
+  plot(sub$age_midpoint,sub$rsv_proportion, 
+       col = 'black',pch =19,cex=1.5, xlab = " ",ylab = "Prop. of Cases")
+  title(main =paste(current_county,
+                    hosp_data_nobump$rsv.HOSPST[hosp_data_nobump$Hosptco == 
+                                                  current_code],sep = ", "),line = 0.6)
+  mtext("Age", side = 1, line = 2)
+  
+NY_plot <- function(){
+  make_county_plot(1)
+}
+
+IL_plot <- function(){
+  make_county_plot(2)
+}
+CO_plot <- function(){
+  make_county_plot(3)
+}
+PA_plot <- function(){
+  make_county_plot(4)
+}
+make_legend <-function(){
+  par(mar = c(1, 4.1, 2.1, 0.5))
+plot(NULL ,xaxt='n',yaxt='n',bty='n',ylab='',xlab='', xlim=0:1, ylim=0:1)
+legend("center",
+         legend = c("actual","ae^(-bx)","k/x^2","ax^(-b)","ke^(-kx))"),
+         col=c('black',palette_4[1],
+               palette_4[2],palette_4[3],palette_4[4]),pch = c(19,NA,NA,NA,NA),lty = c(0,1,1,1,1),lwd=c(2,2,2,2,2))
+}
+
+ggdraw(NY_plot)
+ggdraw(IL_plot)
+ggdraw(CO_plot)
+ggdraw(PA_plot)
+ggdraw(make_legend)
+margin_try <- c(3, 4.1, 2.1, 0.5)
+plot_grid(NY_plot,make_legend,CO_plot,PA_plot,nrow = 2)
+mult_loc <- plot_grid(NY_plot, make_legend, CO_plot, PA_plot, nrow = 2)
+```
+
+
+
+Plots of the worst and the best 
+```{r}
+# want a list of the top 5 and the bottom 5
+loop_range = c(1:2,(nrow(hosp_data_nobump)-4):nrow(hosp_data_nobump))
+
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$und10_model1_MSE,
+                                           decreasing = FALSE),]
+
+for (i in loop_range){
+  current_code <- hosp_data_nobump$Hosptco[i]
+  model1_predict <- hosp_data_nobump$und10_model1_a[i] * exp( -hosp_data_nobump$und10_model1_b[i] * ages)
+  sub <- dat_sum_under10[dat_sum_under10$HOSPSTCO == current_code,]
+  plot(sub$age_midpoint,sub$rsv_proportion, col = 'black', pch =19,  cex = 1.5,
+       main=paste("#",i,":Hospital", current_code, "with MSE", hosp_data_nobump$und10_model1_MSE[i]),
+       xlab = "Age", ylab = "Proportion of Cases")
+  lines(ages,model1_predict, col=palette_4[1],lwd = 2)
+  legend("topright",legend = c("actual","ae^(bx)"),col=c("black",palette_4[1]),lty = 1,,lwd = 2)
+}
+
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$und10_model2_MSE,
+                                           decreasing = FALSE),]
+
+
+for (i in loop_range){
+  current_code <- hosp_data_nobump$Hosptco[i]
+  model2_predict <- hosp_data_nobump$und10_model2_k[i]/(ages^2)
+  sub <- dat_sum_under10[dat_sum_under10$HOSPSTCO == current_code,]
+
+  plot(sub$age_midpoint,sub$rsv_proportion, col = 'black', pch =19,  cex = 1.5,
+       main=paste("#",i,":Hospital", current_code, ", MSE", hosp_data_nobump$und10_model2_MSE[i]),
+       xlab = "Age", ylab = "Proportion of Cases")
+  lines(ages,model2_predict, col=palette_4[2],lwd = 2)
+  legend("topright",legend = c("actual","k/x^2"),col=c("black",palette_4[2]),lty = 1,,lwd = 2)
+}
+
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$und10_model3_MSE,
+                                           decreasing = FALSE),]
+
+for (i in loop_range){
+  current_code <- hosp_data_nobump$Hosptco[i]
+  model3_predict <- hosp_data_nobump$und10_model3_a[i]*ages^(-hosp_data_nobump$und10_model3_b[i])
+  sub <- dat_sum_under10[dat_sum_under10$HOSPSTCO == current_code,]
+
+  plot(sub$age_midpoint,sub$rsv_proportion, col = 'black', pch =19,  cex = 1.5,
+       main=paste("#",i,":Hospital", current_code, ", MSE", hosp_data_nobump$und10_model3_MSE[i]),
+       xlab = "Age", ylab = "Proportion of Cases")
+  lines(ages,model3_predict, col=palette_4[3],lwd = 2)
+  legend("topright",legend = c("actual","ax^(-b)"),col=c("black",palette_4[3]),lty = 1,,lwd = 2)
+}
+
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$und10_model4_sumerror,
+                                           decreasing = FALSE),]
+
+for (i in loop_range){
+  current_code <- hosp_data_nobump$Hosptco[i]
+  model4_predict <- hosp_data_nobump$und10_model4_k[i] * exp(-hosp_data_nobump$und10_model4_k[i] * ages)
+  sub <- dat_sum_under10[dat_sum_under10$HOSPSTCO == current_code,]
+  plot(sub$age_midpoint,sub$rsv_proportion, col = 'black', pch =19,  cex = 1.5,
+       main=paste("#",i,":Hospital", current_code, ", MSE", hosp_data_nobump$und10_model4_MSE[i]),
+       xlab = "Age", ylab = "Proportion of Cases")
+  lines(ages,model4_predict, col=palette_4[4],lwd = 2)
+  legend("topright",legend = c("actual","ke^(-kx))"),col=c("black",palette_4[4]),lty = 1,,lwd = 2)
+}
+
+tail(hosp_data_nobump)
+```
+
+## Error statistics of nls fits
+
+```{r}
+subset <- hosp_data_nobump
+Sum_Errors <- subset[,c("und10_model1_sumerror","und10_model2_sumerror",
+                                  "und10_model3_sumerror","und10_model4_sumerror")]
+colnames(Sum_Errors) <- c("y = a e^(-b x)","y = k/x^2","y =a x^(-b)","y =k e^(-kx)")
+sum_error_means <- colMeans(Sum_Errors)
+Sum_Errors <- Sum_Errors[order(sum_error_means)] 
+sum_error_means <- sum_error_means[order(sum_error_means)]
+print("Sum squared error means by group:")
+print(sum_error_means)
+
+boxplot(Sum_Errors,col = c(palette_4[1],palette_4[3],palette_4[4],palette_4[2]),
+        main = "Sum of Squares Error for Parameterized Models",ylab="SSE")
+
+error_box_plot <- function(){
+MSEs <- subset[,c("und10_model1_MSE","und10_model2_MSE",
+                            "und10_model3_MSE","und10_model4_MSE")]
+colnames(MSEs) <-  c("y = ae^(-bx)","y = k/x^2","y =ax^(-b)","y =ke^(-kx)")
+MSE_means <- colMeans(MSEs)
+MSEs <- MSEs[order(MSE_means)] 
+MSE_means <- MSE_means[order(MSE_means)]
+print("MSE means by group")
+print(MSE_means)
+par(mfrow = c(1,2),mar = c(4, 4, 2, 0.5), oma = c(0, 0, 0, 0),las = 1)
+boxplot(MSEs[,1:2],col = 'grey',
+        main = "Two Parameter",ylab="MSE",ylim= c(0,0.012))
+boxplot(MSEs[,3:4],col = 'grey',
+        main = "One Parameter",ylim= c(0,0.012))
+}
+ggdraw(error_box_plot)
+```
+
+## Is there really a difference due to urbanization?
+ 
+```{r}
+dat_sum_under10_nobump <- dat_sum_under10_nobump %>%
+  mutate(log_pop_density = log(pop_density))
+
+```
+
+
+```{r}
+dat_sum_under10_metro <- dat_sum_under10_nobump[dat_sum_under10_nobump$urban_cat == "Metro",]
+dat_sum_under10_micro <- dat_sum_under10_nobump[dat_sum_under10_nobump$urban_cat == "Micro",]
+dat_sum_under10_rural <- dat_sum_under10_nobump[dat_sum_under10_nobump$urban_cat == "Rural",]
+
+
+Metro_means <- dat_sum_under10_metro %>%
+  group_by(age_cat,age_midpoint) %>%
+  summarise(means = mean(rsv_proportion))
+
+Metro_medians <- dat_sum_under10_metro %>%
+  group_by(age_cat,age_midpoint) %>%
+  summarise(medians = median(rsv_proportion))
+
+
+Micro_means <- dat_sum_under10_micro %>%
+  group_by(age_cat,age_midpoint) %>%
+  summarise(means = mean(rsv_proportion))
+
+Micro_medians <- dat_sum_under10_micro %>%
+  group_by(age_cat,age_midpoint) %>%
+  summarise(medians = median(rsv_proportion))
+
+
+rural_means <- dat_sum_under10_rural %>%
+  group_by(age_cat,age_midpoint) %>%
+  summarise(means = mean(rsv_proportion))
+
+rural_medians <- dat_sum_under10_rural %>%
+  group_by(age_cat,age_midpoint) %>%
+  summarise(medians = median(rsv_proportion))
+
+means <- merge(Metro_means,Micro_means,by=c("age_cat","age_midpoint")) 
+means <- merge(means,rural_means, by= c("age_cat","age_midpoint"))
+means <- means[,-2]
+row.names(means) <- means[,1]
+means <- means[,-1]
+means<- apply(t(means),2,rev)
+means <- means[c(3,2,1),]
+row.names(means) <- c("Metro","Micro","Rural")
+
+barplot(means,beside = TRUE,legend.text = TRUE,
+                       ylim = c(0,0.8),
+                       main = "Mean Proportion of Cases per Age Category by Urban Category",
+                       col = c(palette_4[2],palette_4[3],palette_4[4]),
+                       xlab = "Age Category",
+                       ylab = "Proportion of Cases")
+
+medians <- merge(Metro_medians,Micro_medians,by=c("age_cat","age_midpoint"))
+medians <- merge(medians,rural_medians,by=c("age_cat","age_midpoint"))
+medians <- medians[,-2]
+row.names(medians) <- medians[,1]
+medians <- medians[,-1]
+medians<- apply(t(medians),2,rev)
+medians <- medians[c(3,2,1),]
+row.names(medians) <- c("Metro","Micro","Rural")
+
+barplot(medians,beside = TRUE,legend.text = TRUE,
+                       ylim = c(0,0.8),
+                       main = "Median Proportion of Cases per Age Category by Urban Category",
+                       col = c(palette_4[2],palette_4[3],palette_4[4]),
+                       xlab = "Age Category",
+                       ylab = "Proportion of Cases")
+```
+
+```{r}
+dat_sum_under10_nobump <- dat_sum_under10_nobump %>%
+  mutate(age_cat = as.factor(age_cat))
+
+urban_box_plot <-dat_sum_under10_nobump %>%
+  ggplot(aes(x=age_cat,y = rsv_proportion)) +
+  geom_boxplot(aes(fill = urban_cat),position = "dodge") +
+  scale_fill_manual(values=c(palette_4[1],palette_4[3],palette_4[4]))+
+  labs(x="Age Category",
+       y="Proportion of RSV Cases",,
+       fill = "Urban Cat.")+
+  theme(plot.background = element_blank(), 
+    panel.background = element_blank(), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5),
+    axis.line.y = element_line(color = "grey", size = 0.5),
+    legend.position = c(0.9, 0.5),
+    legend.box.background = element_rect(color = "grey", size = 0.5))
+
+
+print(urban_box_plot)
+
+```
+
+
+
+## Model fits by urban category
+```{r}
+
+mean_plot_b <- function(){
+    x <- dat_sum_under10_metro$age_midpoint
+    y <- dat_sum_under10_metro$rsv_proportion
+    
+    # fit to y = a*e^(bx) 
+    start_values <- c(a=1, b=1)
+    fit <- nls(y ~ a * exp(-b * x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    metro_a <- fit_coef["a"]
+    metro_b <- fit_coef["b"]
+    
+    x <- dat_sum_under10_micro$age_midpoint
+    y <- dat_sum_under10_micro$rsv_proportion
+    
+    # fit to y = a*e^(bx) 
+    start_values <- c(a=1, b=1)
+    fit <- nls(y ~ a * exp(-b * x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    micro_a <- fit_coef["a"]
+    micro_b <- fit_coef["b"]
+    
+    x <- dat_sum_under10_rural$age_midpoint
+    y <- dat_sum_under10_rural$rsv_proportion
+    
+    # fit to y = a*e^(bx) 
+    start_values <- c(a=1, b=1)
+    fit <- nls(y ~ a * exp(-b * x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    rural_a <- fit_coef["a"]
+    rural_b <- fit_coef["b"]
+    
+
+ages <- seq(0, 5, length.out = 100) 
+metro_predict <-  metro_a* exp( -metro_b * ages)
+micro_predict <-  micro_a* exp(- micro_b * ages)
+rural_predict <-  rural_a* exp( -rural_b * ages)
+par(mar = margin_try1,las = 1)
+plot(Metro_means$age_midpoint[1:5],Metro_means$means[1:5], col = palette_4[1],pch = 19,cex =1.5,ylab = " ", main = " ",xlab = " ",bty = 'l')
+points(Micro_means$age_midpoint[1:5],Micro_means$means[1:5], col = palette_4[3],pch = 19,cex =1.5)
+points(rural_means$age_midpoint[1:5],rural_means$means[1:5], col = palette_4[4],pch = 19,cex =1.5)
+lines(ages,metro_predict,col = palette_4[1],lty  = "dashed",lwd = 2)
+lines(ages,micro_predict,col = palette_4[3],lty  = "dashed",lwd = 2)
+lines(ages,rural_predict,col = palette_4[4],lty  = "dashed",lwd = 2)
+legend("topright",legend = c(sprintf("Metro (b = %.2f)", metro_b),
+                             sprintf("Micro (b = %.2f)", micro_b),
+                             sprintf("Rural (b = %.2f)", rural_b)),
+       col = c(palette_4[1],palette_4[3],palette_4[4]),lty=2, cex=1,lwd =2)
+}
+
+mean_plot_k <- function(){
+    x <- dat_sum_under10_metro$age_midpoint
+    y <- dat_sum_under10_metro$rsv_proportion
+    
+    # fit to y = ke^(-kx)
+    start_values <- c(k = 2)
+    fit <- nls(y ~ k* exp(-k * x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    metro_k <- fit_coef["k"]
+    
+    x <- dat_sum_under10_micro$age_midpoint
+    y <- dat_sum_under10_micro$rsv_proportion
+    
+    # fit to y = ke^(-kx)
+    start_values <- c(k = 2)
+    fit <- nls(y ~ k* exp(-k * x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    micro_k <- fit_coef["k"]
+    
+    x <- dat_sum_under10_rural$age_midpoint
+    y <- dat_sum_under10_rural$rsv_proportion
+    
+    # fit to y = ke^(-kx)
+    start_values <- c(k = 2)
+    fit <- nls(y ~ k* exp(-k * x),
+           start = start_values,
+           algorithm = "port",
+           control = nls.control(maxiter = 1000))
+    fit_coef <- coef(fit)
+    rural_k <- fit_coef["k"]
+    
+
+ages <- seq(0.4, 5, length.out = 100) 
+metro_predict <-  metro_k* exp( -metro_k * ages)
+micro_predict <-  micro_k* exp(- micro_k * ages)
+rural_predict <-  rural_k* exp( -rural_k * ages)
+par(mar = margin_try2,las = 1)
+plot(Metro_means$age_midpoint[1:5],Metro_means$means[1:5], col = palette_4[1],pch = 19,cex =1.5,xlab= "Age",ylab = " ",bty = 'l')
+points(Micro_means$age_midpoint[1:5],Micro_means$means[1:5], col = palette_4[3],pch = 19,cex =1.5)
+points(rural_means$age_midpoint[1:5],rural_means$means[1:5], col = palette_4[4],pch = 19,cex =1.5)
+lines(ages,metro_predict,col = palette_4[1],lty  = "dashed",lwd = 2)
+lines(ages,micro_predict,col = palette_4[3],lty  = "dashed",lwd = 2)
+lines(ages,rural_predict,col = palette_4[4],lty  = "dashed",lwd = 2)
+legend("topright",legend = c(sprintf("Metro (k = %.2f)", metro_k),
+                             sprintf("Micro (k = %.2f)", micro_k),
+                             sprintf("Rural (k = %.2f)", rural_k)),
+       col = c(palette_4[1],palette_4[3],palette_4[4]),lty=2, cex=1,lwd =2)
+}
+
+```
+
+```{r}
+margin_try1 <-c(2, 4.1, 2.1, 2.1)
+margin_try2 <-c(4.1, 4.1, 0, 2.1)
+combined_plots <- plot_grid(mean_plot_b,mean_plot_k,ncol = 1, rel_heights = c(1, 1))
+mean_plots <- ggdraw() +
+  draw_plot(combined_plots) +
+  draw_label("Proportion of RSV Cases", 
+             angle = 90, 
+             size = 14, 
+             x = 0.025,  
+             y = 0.5,   
+             hjust = 0.5, 
+             vjust = 0.5)
+print(mean_plots)
+```
+
+
+## Connecting to humidity data
+
+```{r}
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$log_pop_density),]
+ggplot(hosp_data_nobump, aes(x = avg_humid, y = und10_model1_b, 
+                             color = log_pop_density)) +
+  geom_point(size = 3) +
+  scale_color_distiller(palette = gradient_palette)+
+  labs(x = "Average Historic Humidity", y = "Parameter b", 
+       color = "Log Pop. Density", title = "y = a e^(-b x)")
+
+ggplot(hosp_data_nobump, aes(x = avg_humid, y = und10_model1_b, 
+                             color = log_pop_density)) +
+  geom_point(size = 3) +
+  scale_color_distiller(palette = gradient_palette) +
+  labs(x = "Avg. Humidity", y = "b", color = "Log Pop. Density",
+       title = "y = a e^(-b x)")+
+  geom_smooth(data = hosp_data_nobump, aes(x = avg_humid, y =und10_model1_b), 
+              method = "lm", se = FALSE, color = "black",linetype="dashed")
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$avg_humid),]
+ggplot(hosp_data_nobump, aes(x = log_pop_density, y = und10_model1_b, 
+                             color = avg_humid)) +
+  geom_point(size = 2) +
+  scale_color_distiller(palette = gradient_palette) +
+  labs(x = "Log Pop. Density", y = "b", color = "Average Historic Humidity",
+       title = "y = a e^(-b x)")
+bottom_row_b <- ggplot(hosp_data_nobump, aes(x = log_pop_density, y = und10_model1_b,
+                             color = avg_humid)) +
+  geom_point(size = 2) +
+  scale_color_distiller(palette = gradient_palette) +
+  labs(x = "Log Pop. Density", y = "b", color = "Avg. Humidity",
+       title = "    y = a e^(-b x)")+
+  geom_smooth(data = hosp_data_nobump, aes(x = log_pop_density, y =und10_model1_b), 
+              method = "lm", se = FALSE, color = "black",linetype="dashed")+
+  theme(plot.background = element_blank(), 
+    panel.background = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5),
+    axis.line.y = element_line(color = "grey", size = 0.5),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.key.size = unit(0.6, "cm"),      
+    legend.key.width = unit(0.3, "cm"),     
+    legend.text = element_text(size = 8),   
+    legend.title = element_text(size = 9))  
+print(bottom_row_b)
+
+humid_b_lm <- lm(hosp_data_nobump$und10_model1_b ~ hosp_data_nobump$avg_humid)
+logpopdens_b_lm <- lm(hosp_data_nobump$und10_model1_b ~ hosp_data_nobump$log_pop_density)
+summary(humid_b_lm)
+summary(logpopdens_b_lm)
+```
+
+
+```{r} 
+hosp_data_nobump <- hosp_data_nobump[hosp_data_nobump$und10_model4_k<4,]
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$log_pop_density),]
+ggplot(hosp_data_nobump, aes(x = avg_humid, y = und10_model4_k, 
+                             color = log_pop_density)) +
+  geom_point(size = 3) +
+  scale_color_distiller(palette = gradient_palette) +
+  labs(x = "Avg.Humidity", y = "Parameter k", color = "Log Pop. Density",
+       title = "y =k e^(-kx)")
+ggplot(hosp_data_nobump, aes(x = avg_humid, y = und10_model4_k, 
+                             color = log_pop_density)) +
+  geom_point(size = 3) +
+  scale_color_distiller(palette = gradient_palette) +
+  labs(x = "Avg. Humidity", y = "Parameter k", color = "Log Pop. Density",
+       title = "y =k e^(-kx)")+
+  geom_smooth(data = hosp_data_nobump, aes(x = avg_humid, y =und10_model4_k), 
+              method = "lm", se = FALSE, color = "black", linetype="dashed")
+hosp_data_nobump <- hosp_data_nobump[order(hosp_data_nobump$avg_humid),]
+ggplot(hosp_data_nobump, aes(x = log_pop_density, y = und10_model4_k, color = avg_humid)) +
+  geom_point(size = 3) +
+  scale_color_distiller(palette = gradient_palette) +
+  labs(x = "Log Pop. Density", y = "Parameter k", color = "Avg. Humidity",
+       title = "y =k e^(-kx)")
+bottom_row_k <- ggplot(hosp_data_nobump, aes(x = log_pop_density, y = und10_model4_k, color = avg_humid)) +
+  geom_point(size = 2) +
+  scale_color_distiller(palette = gradient_palette) +
+  labs(x = "Log Pop. Density", y = "k", color = "Avg.  Humidity",
+       title = "y =k e^(-kx)")+
+  geom_smooth(data = hosp_data_nobump, aes(x = log_pop_density, y =und10_model4_k),
+              method = "lm", se = FALSE, color = "black", linetype="dashed")+
+  theme(plot.background = element_blank(), 
+    panel.background = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5),
+    axis.line.y = element_line(color = "grey", size = 0.5),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+print(bottom_row_k)
+
+humid_k_lm <- lm(hosp_data_nobump$und10_model4_k ~ hosp_data_nobump$avg_humid)
+logpopdens_k_lm <- lm(hosp_data_nobump$und10_model4_k ~ hosp_data_nobump$log_pop_density)
+summary(humid_k_lm)
+summary(logpopdens_k_lm)
+```
+
+
+
+## Mapping by parameter
+
+```{r}
+hosp_data_cuttoff <- hosp_data_nobump[hosp_data_nobump$und10_model1_b<2.5 & hosp_data_nobump$und10_model4_k<2.5,]
+hosp_data_cuttoff <- hosp_data_cuttoff[hosp_data_cuttoff$und10_model4_k>0.5,]
+hosp_data_cuttoff <- hosp_data_cuttoff[order(hosp_data_cuttoff$und10_model1_b,decreasing = FALSE),]
+usa_map <- map_data("usa")
+library(pals)
+map_plot1 <- ggplot() +
+  geom_polygon(data=usa_map,aes(x=long,y=lat,group=group),fill = '#434343',color ='#434343')+
+  geom_point(data = hosp_data_cuttoff,aes(x=longitude,y =latitude,color = und10_model1_b),size=1.8)+
+  labs(color = "b")+
+  scale_color_distiller(palette = "RdBu",
+                        values=scales::rescale(c(0, 0.4, 0.6, 1)),
+                        guide = guide_colorbar(barheight = 0.7))+
+  theme_minimal()+
+  theme(axis.title = element_blank(),
+    axis.text = element_blank(),        
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none")
+#############
+legend_plot <- ggplot() +
+  geom_point(data = hosp_data_cuttoff, aes(x = longitude, y = latitude, color = und10_model1_b), size = 1.8) +
+  scale_color_distiller(name = "b",palette = "RdBu",
+                        values = scales::rescale(c(0, 0.4, 0.6, 1)),
+                        guide = guide_colorbar(barheight = 10,
+                                               barwidth = 0.8)) +
+  theme_minimal() +
+  theme(legend.position = "right")
+legend_onlyb <- plot_grid(get_legend(legend_plot),rel_heights = c(1))
+print(legend_onlyb)
+##############
+
+hosp_data_cuttoff <- hosp_data_cuttoff[order(hosp_data_cuttoff$und10_model4_k,decreasing = FALSE),]
+
+map_plot2 <- ggplot() +
+  geom_polygon(data=usa_map,aes(x=long,y=lat,group=group),fill = '#434343',color ="#434343")+
+  geom_point(data = hosp_data_cuttoff,aes(x=longitude,y =latitude,color=und10_model4_k),size=1.8)+
+  labs(color = "k")+
+  scale_color_distiller(palette = "RdBu",
+                        values=scales::rescale(c(0, 0.4, 0.6, 1)),
+                        guide = guide_colorbar(barheight = 0.7))+
+  theme_minimal()+
+  theme(axis.title = element_blank(),
+    axis.text = element_blank(),        
+    axis.ticks = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none")
+################
+legend_plot <- ggplot() +
+  geom_point(data = hosp_data_cuttoff, aes(x = longitude, y = latitude, color = und10_model4_k), size = 1.8) +
+  scale_color_distiller(name = "k",palette = "RdBu",
+                        values = scales::rescale(c(0, 0.4, 0.6, 1)),
+                        guide = guide_colorbar(barheight = 10,
+                                               barwidth = 0.8)) +
+  theme_minimal() +
+  theme(legend.position = "right")
+legend_onlyk <- plot_grid(get_legend(legend_plot),rel_heights = c(1))
+print(legend_onlyk)
+################
+print(map_plot1)
+print(map_plot2)
+hist((hosp_data_cuttoff$und10_model1_b))
+hist((hosp_data_cuttoff$und10_model4_k))
+```
+
+
+
+
+## Linear models, Fitted parameters vs urban_cat
+Here we look at the fitted parameters for under10 for model 1 and 4
+- linear models on the fitted parameters
+
+```{r}
+lm1_und10_b_popdens <- lm(und10_model1_b~log_pop_density,data = hosp_data_nobump)
+lm5_und10_k_popdens <- lm(und10_model4_k~log_pop_density,data = hosp_data_nobump)
+lm1_und10_b_humid <- lm(und10_model1_b~avg_humid,data = hosp_data_nobump)
+lm5_und10_k_humid <- lm(und10_model4_k~avg_humid,data = hosp_data_nobump)
+print(summary(lm1_und10_b_popdens))
+print(summary(lm1_und10_b_humid))
+print(summary(lm5_und10_k_popdens))
+print(summary(lm5_und10_k_humid))
+
+```
+> Linear models provide similar error/outputs across log_pop and log_pop_density. Not much difference indicates using log_pop is a sufficient metric vs. log_pop_density.
+
+```{r}
+
+und10_b_combined <- lm(und10_model1_b~log_pop_density +avg_humid,data = hosp_data_nobump)
+
+print(summary(und10_b_combined))
+
+und10_k_combined <- lm(und10_model4_k~log_pop_density +avg_humid, data = hosp_data_nobump)
+
+print(summary(und10_k_combined))
+```
+
+> log_pop_dens is a more important predictor than avg_humidity.
+
+```{r}
+colors <- c("Uni y = ke^(-kx)" = palette_4[2],"Uni y = ae^(-bx)" = palette_4[1],"Multi y = ke^(-kx)" = palette_4[4],"Multi y = ae^(-bx)" = palette_4[3])
+
+combined_b <- tidy(und10_b_combined)
+combined_b <- combined_b %>%
+  mutate(model = "Multi y = ae^(-bx)")
+humid_combined_b <- combined_b[combined_b$term == 'avg_humid',]
+pop_dens_combined_b <- combined_b[combined_b$term == 'log_pop_density',]
+
+combined_k <- tidy(und10_k_combined)
+combined_k <- combined_k %>%
+  mutate(model = "Multi y = ke^(-kx)")
+humid_combined_k <- combined_k[combined_k$term == 'avg_humid',]
+pop_dens_combined_k <- combined_k[combined_k$term == 'log_pop_density',]
+
+pop_dens_k <- tidy(lm5_und10_k_popdens)
+pop_dens_k <- pop_dens_k %>%
+  mutate(model = "Uni y = ke^(-kx)")
+pop_dens_b <- tidy(lm1_und10_b_popdens)
+pop_dens_b <- pop_dens_b %>%
+  mutate(model = "Uni y = ae^(-bx)")
+pop_dens <- bind_rows(pop_dens_b,pop_dens_k)
+pop_dens <- bind_rows(pop_dens,pop_dens_combined_b)
+pop_dens <- bind_rows(pop_dens,pop_dens_combined_k)
+
+
+
+humid_k <- tidy(lm5_und10_k_humid)
+humid_k <- humid_k %>%
+  mutate(model = "Uni y = ke^(-kx)")
+humid_b <- tidy(lm1_und10_b_humid)
+humid_b <- humid_b %>%
+  mutate(model = "Uni y = ae^(-bx)")
+humid <- bind_rows(humid_b,humid_k)
+humid <- bind_rows(humid,humid_combined_b)
+humid <- bind_rows(humid,humid_combined_k)
+
+plot1 <- dwplot(pop_dens)+
+  labs(title = "",x = "b/k")+
+  theme(axis.text.y = element_blank(),        
+    axis.ticks.y = element_blank(),
+    plot.background = element_blank(), 
+    panel.background = element_blank(), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5),
+    legend.position="none")+
+  scale_color_manual(values = colors,name = "Model")+
+  scale_x_continuous(limits = c(-0.008, NA)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#939393", size = 0.6)
+
+plot2 <- dwplot(humid)+
+  labs(title = "",x = "b/k")+
+  theme(axis.text.y = element_blank(),        
+    axis.ticks.y = element_blank(),
+    plot.background = element_blank(), 
+    panel.background = element_blank(), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5),
+    legend.position="none")+
+  scale_color_manual(values = colors,name = "Model")+
+  # scale_x_continuous(limits = c(0, NA)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#939393", size = 0.6)
+# Combine the plots vertically
+
+
+pop_dens <- pop_dens[c(2,5),]
+humid <- humid[c(4,6),]
+
+## Make plots just so that legend looks nice
+plot3 <- dwplot(pop_dens)+
+  labs(title = "Log Pop. Density",x = "b/k")+
+  theme(axis.text.y = element_blank(),        
+    axis.ticks.y = element_blank(),legend.position = "bottom",
+    plot.background = element_blank(), 
+    panel.background = element_blank(), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5))+
+  scale_color_manual(values = colors,name = "")+
+  scale_x_continuous(limits = c(0, NA)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#939393", size = 0.6)
+plot4 <- dwplot(humid)+
+  labs(title = "Log Pop. Density",x = "b/k")+
+  theme(axis.text.y = element_blank(),        
+    axis.ticks.y = element_blank(),legend.position = "bottom",
+    plot.background = element_blank(), 
+    panel.background = element_blank(), 
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    axis.line.x = element_line(color = "grey", size = 0.5))+
+  scale_color_manual(values = colors,name = "")+
+  scale_x_continuous(limits = c(0, NA)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#939393", size = 0.6)
+legendtop <- get_plot_component(plot3, 'guide-box-bottom', return_all = TRUE)
+legendbottom <- get_plot_component(plot4, 'guide-box-bottom', return_all = TRUE)
+
+legends <- plot_grid(legendtop,legendbottom, ncol = 1, align = 'v')
+```
+
+## Parameter statistical test by urban_cat
+ANOVA testing
+Let $\mu_{\text{cat}}$ be the mean of a parameter of a given urban_cat.
+
+$$H_0: \mu_{\text{Metro}}=\mu_{\text{Micro}}=\mu_{\text{Rural}}$$
+
+$$H_1: \text{at least one mean is different.}$$
+```{r}
+hosp_data_nobump %>%
+  group_by(urban_cat) %>%
+  summarise(mean_a = mean(und10_model1_a),
+            sd_a = sd(und10_model1_a),
+            mean_b = mean(und10_model1_b),
+            sd_b = sd(und10_model1_b),
+            mean_k = mean(und10_model4_k),
+            sd_k = sd(und10_model4_k))
+```
+
+
+```{r}
+Anova_model1b <- aov(und10_model1_b ~ urban_cat, data = hosp_data_nobump)
+  print(summary(Anova_model1b))
+  print(TukeyHSD(Anova_model1b))
+  
+Anova_model4k <- aov(und10_model4_k ~ urban_cat, data = hosp_data_nobump)
+  print(summary(Anova_model4k))
+  print(TukeyHSD(Anova_model4k))
+```
+> All pairings of the parameters are statistically significant.
+
+

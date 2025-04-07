@@ -1,0 +1,1000 @@
+---
+title: "Vaccination"
+author: "Presley Kimball"
+date: "2024-06-27"
+output: html_document
+---
+
+## Set up
+```{r}
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(deSolve)
+library(RColorBrewer)
+library(ggplot2)
+library(lhs)
+library(colorspace)
+
+# set your working directory to be the overall file folder
+setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization")
+
+# set color palettes
+palette_4 <- brewer.pal(4, "Spectral") 
+palette_5 <- rev(brewer.pal(9, "YlGnBu")[c(3:6,8)])
+palette_6 <- rev(brewer.pal(9, "YlGnBu")[c(3:8)])
+palette_11 <- colorspace::sequential_hcl(11)
+```
+## Bringing in Texas Data
+```{r}
+# load in Texas data
+load("data/TexasData/TX_pop_size.RData")
+
+# # load rural data
+load("data/TexasData/TX_rural_pop_size.RData")
+```
+
+## Load in contact matrix and correct the format
+```{r}
+# Call in contact matrix
+K <- read_excel("/data/US_contact.xlsx")
+K <- as.matrix(K)
+# duplicate the first column (match other age groups)
+K <- cbind(K[,1],K[,1],K[,1],K[,1],K)
+K <- rbind(K[1,],K[1,],K[1,],K[1,],K)
+colnames(K) <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+                 "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+                 "60-65", "65-70", "70-75", "75+")
+rownames(K) <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+                 "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+                 "60-65", "65-70", "70-75", "75+")
+
+# transpose the matrix to match interpretation of main manuscript
+K <- t(K)
+```
+
+## Setting Global Parameters
+We will use the general age distribution of the US census in 2010.
+\url{https://www.census.gov/content/dam/Census/library/publications/2011/dec/c2010br-03.pdf}
+```{r}
+N0_ages <- c("0-1"= 20201362/5,
+            "1-2" = 20201362/5,
+            "2-3" = 20201362/5,
+            "3-4" = 20201362/5,
+            "4-5" = 20201362/5,
+            "5-10" = 20348657,
+            "10-15" = 20677194,
+            "15-20" = 22040343,
+            "20-25" = 21585999,
+            "25-30" = 21101849,
+            "30-35" = 19962099,
+            "35-40" = 20179642,
+            "40-45" = 20890964,
+            "45-50" = 22708591,
+            "50-55" = 22298125,
+            "55-60" = 19664805,
+            "60-65" = 16817924,
+            "65-70" = 12435263,
+            "70-75" = 9278166,
+            "75+" = 7317795+5743327+3620459+1448366+371244+53364)
+
+# Set global variables. Note all rates are by week
+Lambda = c("0-1"=(385746/25145561)/365.25*7,"1-2" = 0,"2-3" = 0,"3-4" = 0,"4-5" = 0,
+           "5-10" = 0,"10-15" = 0,"15-20" = 0,"20-25" = 0,"25-30" = 0,"30-35" = 0,
+           "35-40" = 0,"40-45" = 0,"45-50" = 0,"50-55" = 0,"55-60" = 0,"60-65" = 0,
+           "65-70" = 0,"70-75" = 0,"75+" = 0)
+mu = (385746/25145561)/365.25*7
+ages <- c(0:4,seq(5,75,by=5))
+T <- length(ages)
+age_cats <- c("0-1","1-2","2-3","3-4","4-5","5-10", "10-15", "15-20", "20-25",
+              "25-30", "30-35", "35-40", "40-45", "45-50", "50-55", "55-60",
+              "60-65", "65-70", "70-75", "75+")
+m = 1/200*7
+gamma_vec = c(1/10,1/7,1/5,1/5)*7
+r_vec = c(1/(diff(ages)*365.25),0)*7
+rho_vec = c(1,0.75,0.51,0.51)
+sigma_vec = c(1,0.76,0.6,0.4)
+p_R = 1
+K = K
+h_1 = c((0.2*0.44*0.9/4+0.08*0.43*0.9/4+0.07*0.23*0.9/4+0.06*0.22*0.9/4*2),# 0-1
+        0.06*0.21*0.8,# 1-2
+        0.05*0.2*0.8,# 2-3
+        0.05*0.2*0.8,#3-4
+        0.05*0.2*0.8,#4-5
+        0.05*0.2*0.8,#5-10
+        rep(0.02*0.05,length(ages)-6)# above 5
+        )
+h_2 = 0.4*h_1
+h_3 = rep(0,length(ages))# set to zero, maybe close to 0 would be better
+nu_m <- (1/6)*(12*7/365.25)
+nu_b <- (1/5)*(12*7/365.25)
+iota_m <- 1-0.57
+iota_b <- 1-0.8
+year_round_vacc = FALSE
+```
+
+## General setup
+```{r}
+StateNames <- c('S0','S1','S2','S3','I1','I2','I3','I4','R','Vm','Vb')
+States <- array(NA, dim=c(length(ages), length(StateNames) )) 
+dimnames(States)[[1]] <- age_cats
+dimnames(States)[[2]] <- StateNames
+
+States_IC <- States
+
+States_IC[,c('S1','S2','S3','I2','I3','I4','R','Vm','Vb')]  = 0
+States_IC[,'S0'] = c(N0_ages[1:nrow(States_IC)])
+States_IC[,'I1'] = c(rep(10000,nrow(States_IC)))  #initializes with 10000 infected person per age group (This is since the N0_ages values are based on entire US population. We rescale down to population being simulated later. This allows for base epidemic to occur.)
+
+# Scale total population size down to 1 (so that the population size is stable)
+# We are assuming that all locations have similar population distribution and 
+# thus are rescaled by the population in each location (done later)
+States_IC <- States_IC/sum(States_IC)
+
+# convert initial condition to a vector for ODE solver
+States_IC_vec <- as.vector(States_IC)
+names(States_IC_vec) <- paste(rep(rownames(States_IC),ncol(States_IC)),
+                              rep(colnames(States_IC),each = nrow(States_IC)), sep = " ")
+```
+
+## Tau vector function
+Function that calculates the tau vector based on two inputs:
+$$\tau = \tau_1*(\text{age_midpoints})+\tau_2$$ only for first five age_categories
+```{r}
+tau_vec <- function(tau_1,tau_2){
+  tau <- rep(1,length(age_cats))
+  for(i in 1:5){
+    tau[i] <- tau_1 * ((i-1)+0.5)+tau_2
+  }
+  return(tau)
+}
+```
+
+## Call in source files
+```{r}
+source('source/SIR.R')
+source('source/Track_Hospitalizations.R')
+source("source/Vacc_Sim.R")
+source('source/Coverage_per_time.R')
+```
+
+## load in base parameters to use in SIR model
+```{r}
+# only want one set of parameters fro now, so delete all others
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+# run vaccination on base params
+```
+
+
+```{r}
+# set coverage rate and run model
+chis <- seq(0,1,0.1)
+taus <- c(1,1.25,0.75)
+
+for (tau in taus){
+  output <- Vacc_Sim(parms, 0,tau,5,15,chis)
+
+  # store model outputs
+  under1 <- output[[1]]
+  total_hosp <- output[[2]]
+  prop_coverage <- output[[3]]
+  max_peak <- output[[4]]
+  
+  # plot outputs
+  plot(total_hosp[,1],total_hosp[,2]*TX_pop_size,
+       xlim = c(0,max(total_hosp[,1])),
+       ylim = c(0,max(total_hosp[,2:ncol(total_hosp)])*TX_pop_size), 
+       type = 'l', lwd = 2,col = palette_6[1],
+       main = paste(tau,": Total Hospitalizations"),xlab = "Weeks", 
+       ylab = "Hospitalizations")
+  for(i in 1:2){
+    j <- c(6,10)[i]
+    k <- c(5,6)[i]
+    lines(total_hosp[,1],total_hosp[,j+1]*TX_pop_size, col = palette_6[k],lwd = 2)
+    }
+  legend("topleft", legend=chis[c(1,6,10)],
+         col=palette_6[c(1,5,6)], lty=1,lwd = 2, cex=0.8,
+         title="Coverage Rate", text.font=4)
+  
+  plot(under1[,1],under1[,2]*TX_pop_size,
+       xlim = c(0,max(under1[,1])),
+       ylim = c(0,max(under1[,2:ncol(total_hosp)])*TX_pop_size),
+       type = 'l', lwd = 2,col = palette_6[1], 
+       main = paste(tau,":under 1"),xlab = "Weeks", ylab = "Hospitalizations")
+  for(i in 1:5){
+    j <- c(3,5,7,9,11)[i]
+    lines(under1[,1],under1[,j+1]*TX_pop_size, col = palette_6[i+1],lwd = 2)
+    }
+  legend("bottomleft", legend=chis[c(1,3,5,7,9,11)],
+         col=palette_6, lty=1,lwd = 2, cex=0.8,
+         title="Coverage Rate", text.font=4)
+  
+  # make bar plots of outputs
+  hosps <- prop_coverage/(max(rowSums(prop_coverage)))
+  hosps_under10 <- hosps[,1:7]
+  hosps_under10[,7] = rowSums(prop_coverage[,1:6])/(max(rowSums(prop_coverage[,1:6])))
+  colnames(hosps_under10) <- c(colnames(hosps_under10[,1:6]),"total")
+  hosps_under10 <- hosps_under10[,c(7,1:6)]
+  if (tau == 1){
+    barplot(hosps_under10, beside= TRUE, legend = TRUE,
+          col = palette_11,
+          main = paste("RSV Cases for Varying Coverage Rates"),
+          xlab = "Age Category",
+          ylab = "Standardized Hospitalizations")
+  }
+  barplot(hosps_under10, beside= TRUE, legend = TRUE, 
+          col = palette_11,
+          main = paste(tau,": RSV Cases for Varying Coverage Rates"),
+          xlab = "Age Category",
+          ylab = "Standardized Hospitalizations")
+  
+    infect_cov = rowSums(hosps)
+    par(mar = c(2, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+    plot(chis,infect_cov,main = "",
+         xlab = "",ylab = "", type = 'l',
+         ylim = c(0,1),lwd = 2,bty ='l',asp = 1)
+    for(i in 1:5){
+      lines(chis,hosps[,i],col = palette_5[i],lwd = 2)
+    }
+    legend("bottomleft",legend = c("Total",age_cats[1:5]),
+           col = c('black',palette_5),lty = 1,lwd = 2,cex = 0.6, bg = 'white')
+    par(mar = c(2, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  par(pty = "s")
+  plot(chis,infect_cov,main = paste(tau,": Coverage Rate vs Hospitalizations"),
+       xlab = "Coverage Rate",ylab = "RSV Cases", type = 'l', 
+       ylim = c(0,1),lwd = 2,bty ='l',asp = 1)
+  for(i in 1:6){
+    lines(chis,hosps[,i],col = palette_6[i],lwd = 2)
+  }
+  legend("bottomleft",legend = c("Total",age_cats[1:6]),col = c('black',palette_6),lty = 1,lwd = 2,cex = 0.6)
+  
+  max_age_cov <- as.data.frame(matrix(nrow = length(chis),ncol = length(age_cats)))
+  row.names(max_age_cov) <- chis
+  colnames(max_age_cov) <- c("total",age_cats[1:(length(age_cats)-1)])
+  
+  for (i in 1:length(max_peak)){
+    mat <- max_peak[[i]]
+    mat <- apply(mat, 2, as.numeric)
+    mat_max <- apply(mat, 2, max)
+    total <- max(rowSums(mat[,2:ncol(mat)]))
+    max_age_cov[i,] <- c(total,mat_max[2:length(mat_max)])
+  }
+  # standardize here
+  if (tau == 1){
+    # standard_max <- max_age_cov[1,1]
+    under1_max <- max_age_cov[1,2]
+  }
+  standard_max <- max_age_cov[1,1]
+  max_age_cov <- max_age_cov/standard_max
+  
+  
+    par(mar = c(2, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+    plot(chis,max_age_cov[,1], type = 'l', lwd = 2,
+             ylim = c(0,3.1),
+             ylab = "",
+             xlab = "",
+             main = "",
+             bty ='l')
+        for (i in 1:5){
+          lines(chis,max_age_cov[,i+1], lwd = 2, col = palette_5[i])
+        }
+        legend("bottomright",legend = c("Total",age_cats[1:5]),col = c('black',palette_5),lty = 1,lwd = 2,cex = 0.7,bg ='white')
+
+}
+```
+# normal plots for tau=1
+```{r}
+colors = rev(c('#4D3ECA','#00CEA6'))
+chis <- c(0,0.5,0.9)
+output <- Vacc_Sim(parms, 0,1,5,15,chis)
+total_hosp <- output[[2]]
+
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(0.5, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2]*TX_pop_size,
+       ylim = c(0,1400),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '',xaxt = 'n')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2]*TX_pop_size,
+       ylim = c(0,1400),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+  legend('topleft',title = 'Coverage Rate', legend = c(0,0.5,0.9),col = c('grey',colors),lty = c(2,1,1),lwd = 2, cex = 0.8)
+
+year_round_vacc <- TRUE
+output <- Vacc_Sim(parms, 0,1,5,15,chis)
+total_hosp <- output[[2]]
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+
+  par(mar = c(2, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2]*TX_pop_size,
+       ylim = c(0,1400),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2]*TX_pop_size,
+       ylim = c(0,1400),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+year_round_vacc <- F
+```
+# plots for tau =0.75
+```{r}
+colors = rev(c('#4D3ECA','#00CEA6'))
+chis <- c(0,0.5,0.9)
+output <- Vacc_Sim(parms, 0,0.75,5,15,chis)
+total_hosp <- output[[2]]
+
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(0.5, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '',xaxt = 'n')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+  legend('topleft',title = 'Coverage Rate', legend = c(0,0.5,0.9),col = c('grey',colors),lty = c(2,1,1),lwd = 2, cex = 0.8)
+
+year_round_vacc <- TRUE
+output <- Vacc_Sim(parms, 0,0.75,5,15,chis)
+total_hosp <- output[[2]]
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(2, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+year_round_vacc <- F
+```
+# plots for tau = 1.25
+```{r}
+colors = rev(c('#4D3ECA','#00CEA6'))
+chis <- c(0,0.5,0.9)
+output <- Vacc_Sim(parms, 0,1.25,5,15,chis)
+total_hosp <- output[[2]]
+
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(0.5, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '',xaxt = 'n')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+  legend('topleft',title = 'Coverage Rate', legend = c(0,0.5,0.9),col = c('grey',colors),lty = c(2,1,1),lwd = 2, cex = 0.8)
+
+year_round_vacc <- TRUE
+output <- Vacc_Sim(parms, 0,1.25,5,15,chis)
+total_hosp <- output[[2]]
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(2, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2],
+       ylim = c(0,1400/TX_pop_size),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+year_round_vacc <- F
+```
+
+
+###### Maternal vs Baby vaccine - CDC timing
+```{r,eval=FALSE}
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+year_round_vacc = FALSE
+# only maternal
+output_maternal <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, baby_vacc = FALSE)
+output_baby <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = FALSE, baby_vacc = TRUE)
+output_both <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, baby_vacc = TRUE)
+output_more_maternal <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, 
+                                 baby_vacc = TRUE, vacc_ratio = 1.5)
+output_more_baby <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, 
+                             baby_vacc = TRUE, vacc_ratio = 0.5)
+save(output_maternal,file = 'output/CDC_maternal_only.RData')
+save(output_baby,file = 'output/CDC_infant_only.RData')
+save(output_both,file = 'output/CDC_both.RData')
+save(output_more_maternal,file = 'output/CDC_more_maternal_only.RData')
+save(output_more_baby,file = 'output/CDC_more_infant_only.RData')
+```
+
+```{r,eval=F}
+load('output/CDC_maternal_only.RData')
+load('output/CDC_infant_only.RData')
+load('output/CDC_both.RData')
+load('output/CDC_more_maternal_only.RData')
+load('output/CDC_more_infant_only.RData')
+names <- c("Only Maternal",  "50% more maternal","Equal Maternal and Baby", "50% more baby" ,"Only Baby")
+
+all_props = NULL
+for (i in 1:5){
+  output <- list(output_maternal,output_more_maternal,output_both,output_more_baby,output_baby)[[i]]
+  prop_coverage <- output[[3]]
+  total <- rowSums(prop_coverage)
+  new_df <- data.frame(total = total, under1 = prop_coverage[,1])
+  colnames(new_df) <- c(paste(names[i], "total"),paste(names[i],"under 1"))
+  if (is.null(all_props)) {
+    all_props <- new_df
+  } else {
+    all_props <- cbind(all_props, new_df)
+  }
+}
+all_props <- all_props[,c(grep("total",colnames(all_props)),grep("under 1",colnames(all_props)))]
+colnames(all_props) <- c("1:0","3:2","1:1","2:3","0:1","1:0","3:2","1:1","2:3","0:1")
+all_props <- all_props/max(all_props)
+all_props <- as.matrix(all_props)
+plt <- barplot(all_props, beside= TRUE, legend = FALSE, 
+        col = brewer.pal(nrow(all_props), "Spectral"),
+        main = "Total (left) and Under 1 (right) RSV Hospitalizations \n Following CDC Timing Strategy",
+        xlab = "Ratio of Maternal:Infant Vaccine",
+        ylab = "Standardized Hospitalizations")
+abline(v = mean(plt), col = "black", lwd = 4, lty = 1)  # Add vertical line
+legend("bottomleft", legend = seq(0,1,0.1), 
+       fill = brewer.pal(nrow(all_props), "Spectral"),
+       cex = 0.6)
+
+```
+remake with only 4 vaccination values 0,0.5,0.8,1 so that it  is more clear
+```{r,eval=F}
+all_props_4cov <- all_props[c(1,6,9,11),]
+plt <- barplot(all_props_4cov, beside= TRUE, legend = FALSE, 
+        col = brewer.pal(nrow(all_props_4cov), "Spectral"),
+        main = "Total (left) and Under 1 (right) RSV Cases for Varying Coverage Rates",
+        xlab = "Ratio of Maternal:Baby Vaccine",
+        ylab = "Standardized Hospitalizations")
+abline(v = mean(plt), col = "black", lwd = 4, lty = 1)  # Add vertical line
+legend("bottomleft", legend = seq(0,1,0.1)[c(1,6,9,11)], 
+       fill = brewer.pal(nrow(all_props_4cov), "Spectral"),
+       cex = 0.7)
+```
+make a table that calculates the reduction in total and baby cases for each simulation
+```{r,eval=F}
+reduction <-1-all_props[11,]/all_props[1]
+reduction <- matrix(reduction, nrow = 2, byrow = TRUE)
+row.names(reduction) <- c("total","under 1")
+colnames(reduction) <- names
+print(reduction)
+```
+
+###### Maternal vs Baby vaccine- year round vaccination
+```{r,eval=F}
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+year_round_vacc = TRUE
+# only maternal
+output_maternal <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, baby_vacc = FALSE)
+output_baby <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = FALSE, baby_vacc = TRUE)
+output_both <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, baby_vacc = TRUE)
+output_more_maternal <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, 
+                                 baby_vacc = TRUE, vacc_ratio = 1.5)
+output_more_baby <- Vacc_Sim(parms, 0,1,5,15,seq(0,1,0.1),mat_vacc = TRUE, 
+                             baby_vacc = TRUE, vacc_ratio = 0.5)
+save(output_maternal,file = 'output/yearround_maternal_only.RData')
+save(output_baby,file = 'output/yearround_infant_only.RData')
+save(output_both,file = 'output/yearround_both.RData')
+save(output_more_maternal,file = 'output/yearround_more_maternal_only.RData')
+save(output_more_baby,file = 'output/yearround_more_infant_only.RData')
+```
+
+```{r,eval=F}
+load('output/yearround_maternal_only.RData')
+load('output/yearround_infant_only.RData')
+load('output/yearround_both.RData')
+load('output/yearround_more_maternal_only.RData')
+load('output/yearround_more_infant_only.RData')
+names <- c("Only Maternal",  "50% more maternal","Equal Maternal and Baby", "50% more baby" ,"Only Baby")
+
+all_props = NULL
+for (i in 1:5){
+  output <- list(output_maternal,output_more_maternal,output_both,output_more_baby,output_baby)[[i]]
+  prop_coverage <- output[[3]]
+  total <- rowSums(prop_coverage)
+  new_df <- data.frame(total = total, under1 = prop_coverage[,1])
+  colnames(new_df) <- c(paste(names[i], "total"),paste(names[i],"under 1"))
+  if (is.null(all_props)) {
+    all_props <- new_df
+  } else {
+    all_props <- cbind(all_props, new_df)
+  }
+}
+all_props <- all_props[,c(grep("total",colnames(all_props)),grep("under 1",colnames(all_props)))]
+colnames(all_props) <- c("1:0","3:2","1:1","2:3","0:1","1:0","3:2","1:1","2:3","0:1")
+all_props <- all_props/max(all_props)
+all_props <- as.matrix(all_props)
+plt <- barplot(all_props, beside= TRUE, legend = FALSE, 
+        col = brewer.pal(nrow(all_props), "Spectral"),
+        main = "Total (left) and Under 1 (right) RSV Hospitalizations \n Following Year Round Vaccination",
+        xlab = "Ratio of Maternal:Infant Vaccine",
+        ylab = "Standardized Hospitalizations")
+abline(v = mean(plt), col = "black", lwd = 4, lty = 1)  # Add vertical line
+legend("bottomleft", legend = seq(0,1,0.1), 
+       fill = brewer.pal(nrow(all_props), "Spectral"),
+       cex = 0.6, bg = "white")
+
+```
+remake with only 4 vaccination values 0,0.5,0.8,1 so that it  is more clear
+```{r,eval=F}
+all_props_4cov <- all_props[c(1,6,9,11),]
+plt <- barplot(all_props_4cov, beside= TRUE, legend = FALSE, 
+        col = brewer.pal(nrow(all_props_4cov), "Spectral"),
+        main = "Total (left) and Under 1 (right) RSV Cases for Varying Coverage Rates",
+        xlab = "Ratio of Maternal:Baby Vaccine",
+        ylab = "Standardized Hospitalizations")
+abline(v = mean(plt), col = "black", lwd = 4, lty = 1)  # Add vertical line
+legend("bottomleft", legend = seq(0,1,0.1)[c(1,6,9,11)], 
+       fill = brewer.pal(nrow(all_props_4cov), "Spectral"),
+       cex = 0.7)
+```
+make a table that calculates the reduction in total and baby cases for each simulation
+```{r,eval=F}
+reduction <-1-all_props[11,]/all_props[1]
+reduction <- matrix(reduction, nrow = 2, byrow = TRUE)
+row.names(reduction) <- c("total","under 1")
+colnames(reduction) <- names
+print(reduction)
+```
+
+# heat map of under1 case reduction against shifts and urbanization parameter
+```{r}
+source('source/SIR.R')
+source('source/Vacc_Sim.R')
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,1)
+year_round_vacc = FALSE
+# -13  is no vaccine of either. 
+rm(reduction)
+rm(max_peak)
+max_peak <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(max_peak) = shifts
+rownames(max_peak) = coverage
+reduction <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(reduction) = shifts
+rownames(reduction) = coverage
+
+
+for (i in 1:length(shifts)){
+  print(shifts[i])
+  for (j in 1:length(coverage)){
+    parms$vacc_shift = shifts[i]
+    output <- Vacc_Sim(parms, 0,1.25,5,10,coverage[j])
+    under1 <- output[[1]]
+    indices = under1[,1]>365.25/7*5+90.25/7+3
+    if (i ==1 && j == 1){
+      no_vacc <- sum(under1[indices,2])
+      under1_max <- max(under1[indices,2])
+    }
+    # print(max(under1[indices,2])/under1_max)
+    max_peak[j,i] <-max(under1[indices,2])/under1_max
+    reduction[j,i] <- sum(under1[indices,2])
+  }
+}
+# plot(under1[indices,1],under1[indices,2])
+save(max_peak,file = 'output/heatmap_maxpeak_covweeks_urban.RData')
+save(reduction,file = 'output/heatmap_reduction_covweeks_urban.RData')
+```
+```{r}
+source('source/SIR.R')
+source('source/Vacc_Sim.R')
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,1)
+year_round_vacc = FALSE
+# -13  is no vaccine of either. 
+rm(reduction)
+rm(max_peak)
+max_peak <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(max_peak) = shifts
+rownames(max_peak) = coverage
+reduction <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(reduction) = shifts
+rownames(reduction) = coverage
+for (i in 1:length(shifts)){
+  print(shifts[i])
+  for (j in 1:length(coverage)){
+    parms$vacc_shift = shifts[i]
+    output <- Vacc_Sim(parms, 0,0.75,5,10,coverage[j])
+    under1 <- output[[1]]
+    indices = under1[,1]>365.25/7*5+90.25/7+3
+    # print(max(under1[indices,2])/under1_max)
+    if (i ==1 && j == 1){
+      no_vacc <- sum(under1[indices,2])
+      under1_max <- max(under1[indices,2])
+    }
+    max_peak[j,i] <-max(under1[indices,2])/under1_max
+    reduction[j,i] <- sum(under1[indices,2])
+  }
+}
+# plot(under1[indices,1],under1[indices,2])
+save(max_peak,file = 'output/heatmap_maxpeak_covweeks_rural.RData')
+save(reduction,file = 'output/heatmap_reduction_covweeks_rural.RData')
+```
+
+
+
+```{r,eval=FALSE}
+
+load('output/heatmap_maxpeak_covweeks_urban.RData')
+peak_min <- min(max_peak)/max_peak[1,1]
+peak_max <- max(max_peak)/max_peak[1,1]
+load('output/heatmap_maxpeak_covweeks_rural.RData')
+if (max(max_peak)/max_peak[1,1]>peak_max){
+  peak_max <-max(max_peak)/max_peak[1,1]
+}
+if (min(max_peak)/max_peak[1,1]<peak_min){
+  peak_min <- min(max_peak)/max_peak[1,1]
+}
+```
+
+# new heat maps
+```{r}
+# CDC infant is 26 weeks
+# CDC maternal is 21.8 weeks
+maternal_weeks <- seq(22,52, by =2)
+infant_weeks <- c(seq(26,52, by =2),rep(52,2))
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,0.5)
+library(pals)
+library(fields)
+color_choice <- rev(parula(100))
+load('output/heatmap_reduction_covweeks_urban.RData') #reduction
+
+
+
+reduction <- reduction/reduction[1,1]
+
+# reduction
+par(mar = c(1.5, 1.5, 1.5, 2),mgp = c(1.6, 1, 0))
+image.plot(t(reduction),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        legend.lab="",
+        axes = F,
+        legend.line = 2.3,zlim= c(0.15,1))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+
+# max_peak
+load('output/heatmap_maxpeak_covweeks_urban.RData')
+max_peak<- max_peak/max_peak[1,1]
+par(mar = c(1.5, 1.5, 1.5, 2), mgp = c(1.6, 1, 0))
+image.plot(t(max_peak),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        legend.lab="",
+        axes = F,
+        legend.line = 2.3,zlim = c(peak_min,peak_max))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+```
+
+```{r}
+# CDC infant is 26 weeks
+# CDC maternal is 21.8 weeks
+maternal_weeks <- seq(22,52, by =2)
+infant_weeks <- c(seq(26,52, by =2),rep(52,2))
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,0.5)
+library(pals)
+library(fields)
+color_choice <- rev(parula(100))
+load('output/heatmap_reduction_covweeks_rural.RData')
+reduction <- reduction/reduction[1,1]
+# reduction
+par(mar = c(1.5, 1.5, 1.5, 0.5),mgp = c(1.6, 1, 0))
+image(t(reduction),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        # legend.lab="Reduction in Under 1 Hospitalizations",
+        axes = F,
+        zlim=c(0.15,1))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+
+# max_peak
+load('output/heatmap_maxpeak_covweeks_rural.RData')
+max_peak<- max_peak/max_peak[1,1]# max_peak*under1_max/correct_under1max
+par(mar = c(1.5, 1.5, 1.5, 0.5),mgp = c(1.6, 1, 0))
+image(t(max_peak),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        # legend.lab="Max Peak (Rel. to No Vacc.)",
+        axes = F,
+        legend.line = 2.3,zlim =c(peak_min,peak_max))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+```
+
+
+## Step funciton
+
+```{r}
+# only want one set of parameters for now, so delete all others
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+
+colors = rev(c('#4D3ECA','#00CEA6'))
+chis <- c(0,0.5,0.9)
+parms$step_function <- TRUE
+parms$vacc_shift <- 0
+output <- Vacc_Sim(parms, 0,1,5,15,chis)
+total_hosp <- output[[2]]
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(0.5, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2]*TX_pop_size,
+       ylim = c(0,1700),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '',xaxt = 'n')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2]*TX_pop_size,
+       ylim = c(0,1700),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+  legend('topleft',title = 'Coverage Rate', legend = c(0,0.5,0.9),col = c('grey',colors),lty = c(2,1,1),lwd = 2, cex = 0.8)
+  
+## new
+  
+chis <- c(0,0.5,0.9)
+parms$step_function <- TRUE
+parms$vacc_shift <- 16
+output <- Vacc_Sim(parms, 0,1,5,15,chis)
+total_hosp <- output[[2]]
+
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(0.5, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2]*TX_pop_size,
+       ylim = c(0,1400),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '',xaxt = 'n')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2]*TX_pop_size,
+       ylim = c(0,1400),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+  legend('topleft',title = 'Coverage Rate', legend = c(0,0.5,0.9),col = c('grey',colors),lty = c(2,1,1),lwd = 2, cex = 0.8)
+  
+  
+  
+
+year_round_vacc <- TRUE
+output <- Vacc_Sim(parms, 0,1,5,15,chis)
+total_hosp <- output[[2]]
+
+indices = total_hosp[,1]>52*3 & total_hosp[,1]<11*52
+  par(mar = c(2, 2, 1, 1), mgp = c(1.6, 0.5, 0))
+  plot(total_hosp[indices,1], total_hosp[indices,2]*TX_pop_size,
+       ylim = c(0,1700),bty = 'l', type ='l', lwd =2, 
+       col ='grey', lty = 2,ylab = '',xlab = '')
+  for (i in 1:2){
+    lines(total_hosp[indices,1], total_hosp[indices,i+2]*TX_pop_size,
+       ylim = c(0,1700),bty = 'l', type ='l', lwd =2, 
+       col =colors[i])
+  }
+year_round_vacc <- F
+```
+
+```{r}
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+
+chis <- c(0,0.5,0.9)
+parms$step_function <- TRUE
+parms$vacc_shift <- 0
+output <- Vacc_Sim(parms, 0,1,5,10,chis)
+
+under1 <- output[[1]]
+indices = under1[,1]>365.25/7*5+90.25/7+3
+under1_max <-max(under1[indices,2])
+```
+
+
+```{r}
+source('source/SIR.R')
+source('source/Vacc_Sim.R')
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+parms$step_function <- TRUE
+rm(TX_parms)
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,1)
+year_round_vacc = FALSE
+rm(reduction)
+rm(max_peak)
+max_peak <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(max_peak) = shifts
+rownames(max_peak) = coverage
+reduction <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(reduction) = shifts
+rownames(reduction) = coverage
+
+
+for (i in 1:length(shifts)){
+  print(shifts[i])
+  for (j in 1:length(coverage)){
+    parms$vacc_shift = shifts[i]
+    output <- Vacc_Sim(parms, 0,1.25,5,10,coverage[j])
+    under1 <- output[[1]]
+    indices = under1[,1]>365.25/7*5+90.25/7+3
+    if (i ==1 && j == 1){
+      no_vacc <- sum(under1[indices,2])
+    }
+    # print(max(under1[indices,2])/under1_max)
+    max_peak[j,i] <-max(under1[indices,2])/under1_max
+    reduction[j,i] <- 1-sum(under1[indices,2])/no_vacc
+  }
+}
+# plot(under1[indices,1],under1[indices,2])
+save(max_peak,file = 'output/step_heatmap_maxpeak_covweeks_urban.RData')
+save(reduction,file = 'output/step_heatmap_reduction_covweeks_urban.RData')
+```
+
+```{r}
+source('source/SIR.R')
+source('source/Vacc_Sim.R')
+load("output/TX_parms.RData")
+parms <- TX_parms[[4]][1,]
+rm(TX_parms)
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,1)
+year_round_vacc = FALSE
+parms$step_function <- TRUE
+# -13  is no vaccine of either. 
+rm(reduction)
+rm(max_peak)
+max_peak <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(max_peak) = shifts
+rownames(max_peak) = coverage
+reduction <- matrix(NA,nrow = length(coverage), ncol = length(shifts))
+colnames(reduction) = shifts
+rownames(reduction) = coverage
+for (i in 1:length(shifts)){
+  print(shifts[i])
+  for (j in 1:length(coverage)){
+    parms$vacc_shift = shifts[i]
+    output <- Vacc_Sim(parms, 0,0.75,5,10,coverage[j])
+    under1 <- output[[1]]
+    indices = under1[,1]>365.25/7*5+90.25/7+3
+    # print(max(under1[indices,2])/under1_max)
+    if (i ==1 && j == 1){
+      no_vacc <- sum(under1[indices,2])
+    }
+    max_peak[j,i] <-max(under1[indices,2])/under1_max
+    reduction[j,i] <- 1-sum(under1[indices,2])/no_vacc
+  }
+}
+# plot(under1[indices,1],under1[indices,2])
+save(max_peak,file = 'output/step_heatmap_maxpeak_covweeks_rural.RData')
+save(reduction,file = 'output/step_heatmap_reduction_covweeks_rural.RData')
+```
+
+```{r,eval=FALSE}
+
+load('output/step_heatmap_maxpeak_covweeks_urban.RData')
+peak_min <- min(max_peak)
+peak_max <- max(max_peak)
+load('output/step_heatmap_maxpeak_covweeks_rural.RData')
+if (max(max_peak)>peak_max){
+  peak_max <-max(max_peak)
+}
+if (min(max_peak)<peak_min){
+  peak_min <- min(max_peak)
+}
+```
+
+```{r}
+# CDC infant is 26 weeks
+# CDC maternal is 21.8 weeks
+maternal_weeks <- seq(22,52, by =2)
+infant_weeks <- c(seq(26,52, by =2),rep(52,2))
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,0.5)
+library(pals)
+library(fields)
+color_choice <- parula(100)
+load('output/step_heatmap_reduction_covweeks_urban.RData') #reduction
+
+
+# reduction
+par(mar = c(1.5, 1.5, 1.5, 2),mgp = c(1.6, 1, 0))
+image.plot(t(reduction),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        legend.lab="",
+        axes = F,
+        legend.line = 2.3,zlim= c(0,1))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+
+# max_peak
+load('output/step_heatmap_maxpeak_covweeks_urban.RData')
+par(mar = c(1.5, 1.5, 1.5, 2), mgp = c(1.6, 1, 0))
+image.plot(t(max_peak),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        legend.lab="",
+        axes = F,
+        legend.line = 2.3,zlim = c(peak_min,peak_max))
+        #,zlim = c(peak_min,peak_max))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+```
+
+```{r}
+# CDC infant is 26 weeks
+# CDC maternal is 21.8 weeks
+maternal_weeks <- seq(22,52, by =2)
+infant_weeks <- c(seq(26,52, by =2),rep(52,2))
+coverage = seq(0,1,0.05)
+shifts <- seq(0,15,0.5)
+library(pals)
+library(fields)
+color_choice <- parula(100)
+load('output/step_heatmap_reduction_covweeks_rural.RData')
+ #reduction
+
+# reduction
+par(mar = c(1.5, 1.5, 1.5, 0.5),mgp = c(1.6, 1, 0))
+image(t(reduction),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        # legend.lab="Reduction in Under 1 Hospitalizations",
+        axes = F,
+        zlim=c(0,0.9))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+
+# max_peak
+load('output/step_heatmap_maxpeak_covweeks_rural.RData')
+par(mar = c(1.5, 1.5, 1.5, 0.5),mgp = c(1.6, 1, 0))
+image(t(max_peak),
+        xlab = '',
+        ylab = '',
+        col=color_choice,
+        # legend.lab="Max Peak (Rel. to No Vacc.)",
+        axes = F, 
+        #legend.line = 2.3)#
+      zlim =c(peak_min,peak_max))
+axis(2,at=seq(0,1, length=length(coverage)), labels = coverage,tick = F,line = -0.7)
+axis(1,at=seq(0,1, length=length(infant_weeks)), labels = infant_weeks,tick = F,line = -0.7)
+axis(3,at=seq(0,1, length=length(maternal_weeks)), labels = maternal_weeks,tick = F,line = -0.7)
+```
+
