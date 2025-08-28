@@ -14,7 +14,14 @@ Track_Hospitalizations <- function(solution,parms){
   # call in optional childcare amplification 
   tau_1 <- parms[["tau_1"]]
   tau_2 <- parms[["tau_2"]]
-  tau_vec <- tau_vec(tau_1,tau_2)
+  if (!is.null(parms$Ktau_all) ){
+    if( parms$Ktau_all == TRUE) { # if all mult is provided and on
+      tau_vec_comp <- rep(tau_2,length(age_cats))} else {
+        tau_vec_comp <- tau_vec(tau_1,tau_2)
+      }
+  } else{ # Ktau_all not provided or is False
+    tau_vec_comp <- tau_vec(tau_1,tau_2)
+  }
   
   # create q_vec to be the 6 fitted parameters followed by 1's
   q_vec <- c(q_1,q_2,q_3,q_4,q_5,q_6,rep(1,(length(h_1)-6)))
@@ -53,8 +60,8 @@ Track_Hospitalizations <- function(solution,parms){
     # calculate transmission
     N_i <- rowSums(States) #number in each age category
     K_mod <- sweep(K,1,N_i,"/") # divide each row of contact matrix by number in that age_cat
-    K_mod <- sweep(K_mod,2,tau_vec,"*") # multiply each column by optional amplification tau
-    K_mod <- sweep(K_mod,1,tau_vec,"*") # multiply each row by optional amplification tau
+    K_mod <- sweep(K_mod,2,tau_vec_comp,"*") # multiply each column by optional amplification tau
+    K_mod <- sweep(K_mod,1,tau_vec_comp,"*") # multiply each row by optional amplification tau
     sums <- rho_vec[1]*(K_mod %*% I1)+rho_vec[2]*(K_mod %*% I2)+
       rho_vec[3]*(K_mod %*% I3)+rho_vec[4]*(K_mod %*% I4)
     b_vec <- alpha_1*(alpha_2*cos((2*pi*t-alpha_3)/365.25*7)+1)*sums

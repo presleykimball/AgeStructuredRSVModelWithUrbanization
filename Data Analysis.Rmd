@@ -3,7 +3,7 @@ title: "Fitting curves"
 author: "Presley Kimball"
 date: "2024-05-24"
 output: html_document
----
+--- 
 
 ## Initialize packages and data
 ```{r setup, include=FALSE}
@@ -13,7 +13,6 @@ knitr::opts_chunk$set(echo = TRUE)
 ```{r}
 require("haven")
 require("doBy")
-library(minpack.lm)
 library(ggplot2)
 library(dplyr)
 library(RColorBrewer)
@@ -41,7 +40,7 @@ gradient_palette <- "Spectral"
 
 ## Load in clean data
 ```{r}
-setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization")
+setwd("FILLIN")
 # these files are protected and cannot be posted to git hub. Put data folder
 # in exterior folder to repository.
 load("data/hosp_data_clean.RData")
@@ -68,6 +67,7 @@ under20_age_counts <- counts_by_age[counts_by_age$age_midpoint<20,] %>%
 
 # attach pop density and urban_cat s to dat_sum
 dat_sum$pop_density <- numeric(nrow(dat_sum))
+dat_sum$population <- numeric(nrow(dat_sum))
 dat_sum$urban_cat <- numeric(nrow(dat_sum))
 dat_sum$urban_rural <- numeric(nrow(dat_sum))
 for (i in 1:nrow(dat_sum)) {
@@ -77,6 +77,8 @@ for (i in 1:nrow(dat_sum)) {
     hosp_data_clean$urban_cat[hosp_data_clean$Hosptco==dat_sum$HOSPSTCO[i]]
   dat_sum$urban_rural[i] <-
     hosp_data_clean$urban_rural[hosp_data_clean$Hosptco==dat_sum$HOSPSTCO[i]]
+  dat_sum$population[i] <-
+    hosp_data_clean$population[hosp_data_clean$Hosptco==dat_sum$HOSPSTCO[i]]
 }
 ```
 
@@ -626,6 +628,47 @@ urban_box_plot <-dat_sum_under10_nobump %>%
 print(urban_box_plot)
 
 ```
+
+## GLM 
+```{r}
+### binomial
+mod <- glm(
+  cbind(rsv.sum, rsv.total - rsv.sum) ~ age_cat * urban_cat,
+  family = quasibinomial(link = "logit"),
+  data = hosp_data_nobump
+)
+summary(mod)
+
+stargazer(mod)
+```
+
+## GAM
+
+
+```{r}
+hist(hosp_data_nobump$und10_model1_b)
+
+b_GAM <-gam(und10_model1_b ~ s(avg_humid, k = 5)+s(log_pop_density),data = hosp_data_nobump)
+b_GAM_combine <-gam(und10_model1_b ~ s(avg_humid,log_pop_density),data = hosp_data_nobump)
+
+anova(b_GAM,b_GAM_combine,test = 'F')
+
+summary(b_GAM)
+summary(b_GAM_combine)
+```
+
+```{r}
+hist(hosp_data_nobump$und10_model4_k)
+
+k_GAM <-gam(und10_model4_k ~ s(avg_humid, k = 5)+s(log_pop_density),data = hosp_data_nobump)
+k_GAM_combine <-gam(und10_model4_k ~ s(avg_humid,log_pop_density),data = hosp_data_nobump)
+
+anova(k_GAM,k_GAM_combine,test = 'F')
+
+summary(k_GAM)
+summary(k_GAM_combine)
+```
+
 
 
 

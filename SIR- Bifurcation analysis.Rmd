@@ -19,7 +19,7 @@ library(viridis)
 library(lhs)
 
 # set your working directory to be the overall file folder
-setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization")
+setwd("FILLIN")
 
 # set color palettes
 palette_4 <- brewer.pal(4, "Spectral") 
@@ -38,7 +38,7 @@ load("/data/TexasData/TX_sum.RData")
 # load("/data/TexasData/TX_rural_age_cat.RData")
 # load("/data/TexasData/TX_rural_sum.RData")
 # 
-# # load urban data
+# load urban data
 # load("/data/TexasData/TX_urban_pop_size.RData")
 # load("/data/TexasData/TX_urban_age_cat.RData")
 # load("/data/TexasData/TX_urban_sum.RData")
@@ -579,3 +579,231 @@ solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
   plot(hospitalizations[,1],rowSums(hospitalizations[,2:ncol(hospitalizations)]),col='black',lwd =2, type ='l', main = paste(parms$alpha_2))
 ```
 
+
+
+## Traversing the surface
+Due to  intensity heat map, look at the dynamics as we vary contact rate and seasonal forcing/mean transmission rate
+```{r}
+# low mean transmission with varying contact rate
+tau_list <- seq(min(tau_2),max(tau_2),length.out =20)
+low_alpha_1 <- alpha_1[5]
+parms <- Texas_best_parms
+parms$alpha_1 <- low_alpha_1
+parms$tau_1 <- 0
+for (t_2 in tau_list){
+  parms$tau_2 <- t_2
+  solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
+  # Get hospitalization data from solution
+  hospitalizations <- Track_Hospitalizations(solution = solution,parms = parms)
+  
+  # Rescale timescales to start weeks at 0
+  solution[,1] <- solution[,1]- min(solution[,1])
+  hospitalizations[,1]<- hospitalizations[,1]-min(hospitalizations[,1])
+
+  plot(hospitalizations[,1],
+       rowSums(hospitalizations[,2:ncol(hospitalizations)]),
+       col='black',lwd =2, type ='l', main = paste('tau=',t_2))
+}
+```
+
+```{r}
+# rural contact rate varying mean transmission
+# alpha_list <- seq(min(alpha_1),max(alpha_1),length.out =20)
+# parms <- Texas_best_parms
+# parms$tau_1 <- 0
+# parms$tau_2 <- 23.4/26.9
+# for (a1 in alpha_list){
+#   parms$alpha_1 <- a1
+#   solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
+#   # Get hospitalization data from solution
+#   hospitalizations <- Track_Hospitalizations(solution = solution,parms = parms)
+#   
+#   # Rescale timescales to start weeks at 0
+#   solution[,1] <- solution[,1]- min(solution[,1])
+#   hospitalizations[,1]<- hospitalizations[,1]-min(hospitalizations[,1])
+# 
+#   plot(hospitalizations[,1],
+#        rowSums(hospitalizations[,2:ncol(hospitalizations)]),
+#        col='black',lwd =2, type ='l', main = paste('alpha1=',a1))
+# }
+
+
+# standard<- 100000
+# num_a1s <- 10
+# alpha_list <- seq(min(alpha_1),0.3,length.out =num_a1s)
+# ylimit <- 0.00011#10*10^(-5)
+# colors <- rev(colorRampPalette(brewer.pal(9, "Blues")[3:9])(num_a1s))
+# high_alpha_2 <- 0.16
+# # file_name <- "figures/Review/low_contact_vary_transmission.png"
+# parms <- Texas_best_parms
+# t_2 <- 0.7
+# parms$tau_2 <- t_2
+# parms$tau_1 <- 0
+
+
+standard<- 100000
+num_a1s <- 10
+alpha_list <- seq(0.15,0.6,length.out =num_a1s)
+ylimit <- 0.00011#10*10^(-5)
+colors <- rev(colorRampPalette(brewer.pal(9, "Blues")[3:9])(num_a1s))
+high_alpha_2 <- 0.16
+# file_name <- "figures/Review/low_contact_vary_transmission.png"
+parms <- Texas_best_parms
+t_2 <- 1
+parms$tau_2 <- t_2
+parms$tau_1 <- 0
+
+i = 1
+for (a_1 in alpha_list){
+  parms$alpha_1 <- a_1
+  solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
+  # Get hospitalization data from solution
+  hospitalizations <- Track_Hospitalizations(solution = solution,parms = parms)
+  
+  # Rescale timescales to start weeks at 0
+  solution[,1] <- solution[,1]- min(solution[,1])
+  hospitalizations[,1]<- hospitalizations[,1]-min(hospitalizations[,1])
+  
+  if (i ==1){
+    # png(file_name, width = 5, height = 3.5, units = "in", res = 300)
+    par(mar = c(2, 2, 1.5, 1))
+    plot(hospitalizations[(nrow(hospitalizations)
+                           -52*5):(nrow(hospitalizations)),1]-261,
+         standard*rowSums(hospitalizations[(nrow(hospitalizations)-
+                                              52*5):(nrow(hospitalizations)),
+                                           2:ncol(hospitalizations)]),
+       col=colors[i],lwd =2, type ='l', ylim = c(0,ylimit*standard),
+       ylab = paste('Total Hospitalizations per', standard),
+       xlab = 'Weeks',
+       main = paste('tau_2', t_2),
+       bty = "l")
+    max_tot <- max(rowSums(hospitalizations[(nrow(hospitalizations)-
+                                               52*5):(nrow(hospitalizations)),
+                                            2:ncol(hospitalizations)]))
+  }else{
+    lines(hospitalizations[(nrow(hospitalizations)-
+                              52*5):(nrow(hospitalizations)),1]-261,
+       standard*rowSums(hospitalizations[(nrow(hospitalizations)-
+                                            52*5):(nrow(hospitalizations)),
+                                         2:ncol(hospitalizations)]),
+       col=colors[i],lwd =2, type ='l')
+    maxi <- max(rowSums(hospitalizations[(nrow(hospitalizations)-
+                                            52*5):(nrow(hospitalizations)),
+                                         2:ncol(hospitalizations)]))
+    if (maxi> max_tot){
+      max_tot <- maxi
+    }
+  }
+  i <- i+1
+}
+legend('top', legend = round(alpha_list,2), col = colors, lty =1, cex =0.8, title = 'Mean Transmisstion Rate',ncol = 5, lwd = 3)
+# dev.off()
+```
+
+
+
+```{r}
+standard<- 100000
+num_taus <- 5
+# blues <- colorRampPalette(c("midnightblue", "lightblue"))(10)
+
+# high seasonal forcing with varying contact rate
+tau_list <- seq(min(tau_2),23.4/26.9,length.out =num_taus)
+ylimit <- 0.0001181349+0.00005
+colors <- rev(colorRampPalette(brewer.pal(9, "Blues")[3:9])(num_taus))
+high_alpha_2 <- 0.2#max(parm_set$alpha_2)-0.01
+file_name <- "figures/supplement/NonlinearityFig3/TopLeft.pdf"
+
+# overhump
+# tau_list <- seq(0.8,1.1,length.out = num_taus)
+# ylimit <- 8*10^(-5)
+# colors <- rev(colorRampPalette(brewer.pal(9, "Reds")[3:9])(num_taus))
+# high_alpha_2 <- 0.16
+# file_name <- "figures/supplement/NonlinearityFig3/Bump.pdf"
+
+
+parms <- Texas_best_parms
+parms$alpha_2 <- high_alpha_2
+parms$tau_1 <- 0
+i = 1
+for (t_2 in tau_list){
+  parms$tau_2 <- t_2
+  solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
+  # Get hospitalization data from solution
+  hospitalizations <- Track_Hospitalizations(solution = solution,parms = parms)
+  
+  # Rescale timescales to start weeks at 0
+  solution[,1] <- solution[,1]- min(solution[,1])
+  hospitalizations[,1]<- hospitalizations[,1]-min(hospitalizations[,1])
+  
+  if (i ==1){
+    
+    # png(file_name, width = 5, height = 3.5, units = "in", res = 300)
+    pdf(file_name, width = 5, height = 3.5)
+    par(mar = c(2, 2, 1.5, 1))
+    plot(hospitalizations[(nrow(hospitalizations)
+                           -52*5):(nrow(hospitalizations)),1]-261,
+         standard*rowSums(hospitalizations[(nrow(hospitalizations)-
+                                              52*5):(nrow(hospitalizations)),
+                                           2:ncol(hospitalizations)]),
+       col=colors[i],lwd =2, type ='l', ylim = c(0,ylimit*standard),
+       ylab = paste('Total Hospitalizations per', standard),
+       xlab = 'Weeks',
+       main = '',
+       bty = "l",
+      xaxt = "n")
+    axis(1, at = axTicks(1), labels = FALSE)
+    max_tot <- max(rowSums(hospitalizations[(nrow(hospitalizations)-
+                                               52*5):(nrow(hospitalizations)),
+                                            2:ncol(hospitalizations)]))
+  }else{
+    lines(hospitalizations[(nrow(hospitalizations)-
+                              52*5):(nrow(hospitalizations)),1]-261,
+       standard*rowSums(hospitalizations[(nrow(hospitalizations)-
+                                            52*5):(nrow(hospitalizations)),
+                                         2:ncol(hospitalizations)]),
+       col=colors[i],lwd =2, type ='l')
+    maxi <- max(rowSums(hospitalizations[(nrow(hospitalizations)-
+                                            52*5):(nrow(hospitalizations)),
+                                         2:ncol(hospitalizations)]))
+    if (maxi> max_tot){
+      max_tot <- maxi
+    }
+  }
+  i <- i+1
+}
+legend('top', legend = round(tau_list,2), col = colors, lty =1, cex =0.8, title = '',ncol = 5, lwd = 3)
+dev.off()
+```
+
+
+```{r}
+t <- 0:260
+Lmbda <- parms$alpha_1*(parms$alpha_2*cos((2*pi*t-parms$alpha_3)/365.25*7)+1)
+png("figures/supplement/NonlinearityFig3/TopLeft_transmission.png",
+    width = 5, height = 1, units = "in", res = 300)
+# pdf("figures/supplement/NonlinearityFig3/TopLeft_transmission.pdf", width = 5, height = 1)
+par(mar = c(2, 2, 1.5, 1))
+plot(t,Lmbda, type = 'l', bty = 'l', lwd = 2, ylab = '',xlab = '',yaxt = "n")
+dev.off()
+```
+
+
+```{r}
+sub <- parm_set[parm_set$alpha_2 == 0.2026,]
+plot(sub$tau_2,sub$Intensity, main = 'alpha_2 = 0.2026', type = 'l')
+tau_min_intens <- sub$tau_2[sub$Intensity== min(sub$Intensity)]
+
+parms$tau_2 <- tau_min_intens
+  solution <- ODE_solve_SIR(parms,States_IC_vec,20,522)
+  # Get hospitalization data from solution
+  hospitalizations <- Track_Hospitalizations(solution = solution,parms = parms)
+  
+  # Rescale timescales to start weeks at 0
+  solution[,1] <- solution[,1]- min(solution[,1])
+  hospitalizations[,1]<- hospitalizations[,1]-min(hospitalizations[,1])
+
+  plot(hospitalizations[,1],
+       rowSums(hospitalizations[,2:ncol(hospitalizations)]),
+       col='black',lwd =2, type ='l', main = paste('tau=',tau_min_intens))
+```

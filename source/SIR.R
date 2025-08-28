@@ -16,7 +16,14 @@ SIR <- function(t,States_vec,parms){
   # call in optional childcare amplification
   tau_1 <- parms[["tau_1"]]
   tau_2 <- parms[["tau_2"]]
-  tau_vec <- tau_vec(tau_1,tau_2)
+  if (!is.null(parms$Ktau_all) ){
+    if( parms$Ktau_all == TRUE) { # if all mult is provided and on
+    tau_vec_comp <- rep(tau_2,length(age_cats))} else {
+      tau_vec_comp <- tau_vec(tau_1,tau_2)
+    }
+  } else{ # Ktau_all not provided or is False
+    tau_vec_comp <- tau_vec(tau_1,tau_2)
+  }
 
   if (is.null(parms$step_function) == FALSE){
     if (parms$step_function == TRUE){
@@ -40,12 +47,12 @@ SIR <- function(t,States_vec,parms){
         # call in vaccination coverage parameters. Set vaccination only to be on during RSV season.
         # From CDC, maternal vaccination is only given September through January;
         # baby vaccination is given October through March.
-        if(t %% 365.25/7 <= 31/7+shift | t %% 365.25/7 >=242.25/7-shift){
+        if(t %% (365.25/7) <= 31/7+shift | t %% (365.25/7) >=242.25/7-shift){
           chi_m <- parms[["chi_m"]]
         } else{
           chi_m <- 0
         }
-        if(t %% 365.25/7 <= 90.25/7+shift| t %% 365.25/7 >=272.25/7-shift){
+        if(t %% (365.25/7) <= 90.25/7+shift| t %% (365.25/7) >=272.25/7-shift){
           chi_b <- parms[["chi_b"]]
         } else{
           chi_b <- 0
@@ -91,8 +98,8 @@ SIR <- function(t,States_vec,parms){
   # calculate infection rate (each entry of the vector is the infection rate for that age group)
   N_i <- rowSums(States) #number in each age category
   K_mod <- sweep(K,1,N_i,"/") # divide each row of contact matrix by number in that age_cat
-  K_mod <- sweep(K_mod,2,tau_vec,"*") # multiply each column by optional amplification tau
-  K_mod <- sweep(K_mod,1,tau_vec,"*") # multiply each row by optional amplification tau
+  K_mod <- sweep(K_mod,2,tau_vec_comp,"*") # multiply each column by optional amplification tau
+  K_mod <- sweep(K_mod,1,tau_vec_comp,"*") # multiply each row by optional amplification tau
   sums <- rho_vec[1]*(K_mod %*% I1)+rho_vec[2]*(K_mod %*% I2)+rho_vec[3]*(K_mod %*% I3)+rho_vec[4]*(K_mod %*% I4)
   b_vec <- alpha_1*(alpha_2*cos((2*pi*t-alpha_3)/365.25*7)+1)*sums
   

@@ -27,18 +27,38 @@ Make_Plots <- function(param_set,pop_size,data_sum,data_age_cat, State_name){
   
   
   # Plot hospitalizations against data
+  # pdf('figures/supplement/step_fit.pdf',height = 4,width = 7)
   plot(data_sum$AWEEK1,data_sum$cases,type = 'l', 
        main = paste("Total Hospitalizations in", State_name),xlab = "Weeks",ylab = "Count", col = 'black',lwd =2,
        bty = 'l', ylim = c(0,max(c(rowSums(hospitalizations[,2:ncol(hospitalizations)]),data_sum$cases)))
   )
   lines(hospitalizations[,1],rowSums(hospitalizations[,2:ncol(hospitalizations)]),col=palette_4[1],lwd =2)
   legend("bottomright",legend = c("data","predicted"),col = c('black',palette_4[1]),lty=c(1,1),cex=0.8,bg = 'white')
+  # dev.off()
   
+  # pdf("figures/NoError_timeseries_total.pdf")
+  #   plot(data_sum$AWEEK1,data_sum$cases,type = 'l',
+  #        main = paste("Total Hospitalizations in", State_name),xlab = "Weeks",ylab = "Count", col = 'black',lwd =2)
+  #   lines(hospitalizations[,1],rowSums(hospitalizations[,2:ncol(hospitalizations)]),col=palette_4[1],lwd =2)
+  #   legend("bottomright",legend = c("data","predicted"),col = c('black',palette_4[1]),lty=c(1,1),cex=0.8)
+  # dev.off()
   
   # print the minimum cases
   print(paste("Minimum achieved:",min(rowSums(hospitalizations[,2:ncol(hospitalizations)]))))
   
-  # plot for first six age categories
+  # #plot for first six age categories
+  # for (i in 2:7) {
+  #   sub <- data_age_cat[data_age_cat$age_cat==age_cats[i-1],]
+  #   pdf(paste0("figures/NoError_timeseries_",i-1,".pdf"))
+  #     plot(sub$AWEEK1,sub$cases,col = 'black',type = 'l',
+  #          main =paste("Total Hospitalizations for",colnames(hospitalizations)[i], 
+  #                      "year olds in", State_name), xlab = "Weeks", ylab = "Count",lwd=2)
+  #     lines(hospitalizations[,1],hospitalizations[,i],,col= palette_4[1],lwd=2)
+  #     legend("bottomright",legend = c("data","predicted"),col = c("black",palette_4[1]),lty=c(1,1),cex=0.8)
+  #   dev.off()
+  # }
+  
+  # Reloop to save figures
   for (i in 2:7) {
     sub <- data_age_cat[data_age_cat$age_cat==age_cats[i-1],]
     plot(sub$AWEEK1,sub$cases,col = 'black',type = 'l',
@@ -79,16 +99,40 @@ Make_Plots <- function(param_set,pop_size,data_sum,data_age_cat, State_name){
           xlab = "Age Category",
           ylab = "Proportion of Cases",
           las =2)
-  
+  # pdf("figures/NoError_barplot_allages.pdf")
+  # barplot(comparison,beside = TRUE,legend.text = TRUE,
+  #         ylim = c(0,0.8),
+  #         main = paste("Proportion of Reported RSV by Age Group in", State_name,"Best Case"),
+  #         col = c(palette_4[1],palette_4[2]),
+  #         xlab = "Age Category",
+  #         ylab = "Proportion of Cases",
+  #         las =2)
+  # dev.off()
   # # Create plot of only under 10
   comparison_young <- comparison[,colnames(comparison) %in% c("0-1","1-2","2-3","3-4",
                                                               "4-5","5-10")]
-  
+  # pdf("figures/NoError_barplot_young.pdf")
+  # barplot(comparison_young,beside = TRUE,legend.text = TRUE,
+  #         ylim = c(0,0.8),
+  #         main = paste("Proportion of Reported RSV by Age Group in", State_name,"Best Case"),
+  #         col = c(palette_4[1],palette_4[2]),
+  #         xlab = "Age Category",
+  #         ylab = "Proportion of Cases")
+  # dev.off()
   barplot(comparison_young,beside = TRUE,legend.text = TRUE,
           ylim = c(0,0.8),
           main = paste("Proportion of Reported RSV by Age Group in", State_name,"Best Case"),
           col = c(palette_4[1],palette_4[2]),
           xlab = "Age Category",
           ylab = "Proportion of Cases")
-  
+  # young_barplot <- function(){
+  #   barplot(comparison_young,beside = TRUE,legend.text = TRUE,
+  #           ylim = c(0,0.8),
+  #           main = paste("Proportion of Reported RSV by Age Group in", State_name,"Best Case"),
+  #           col = c(palette_4[1],palette_4[2]),
+  #           xlab = "Age Category",
+  #           ylab = "Proportion of Cases")
+  # }
+  # return(young_barplot)
+  return(hospitalizations)
 }

@@ -19,7 +19,7 @@ library(viridis)
 library(lhs)
 
 # set your working directory to be the overall file folder
-setwd("C:/Users/prkimbal/Summer2024/AgeStructuredRSVModelWithUrbanization")
+setwd("FILLIN")
 
 # set color palettes
 palette_4 <- brewer.pal(4, "Spectral") 

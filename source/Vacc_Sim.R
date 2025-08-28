@@ -30,6 +30,9 @@ Vacc_Sim <- function(parms,tau_1,tau_2,time_of_vacc,time_post_vacc, # put in sim
   colnames(prop_coverage) <- age_cats
   # max_peak stores the max peak of each year against the coverage rate for 
   max_peak = list()
+  # S_list stores susceptible time series
+  S_list <- data.frame(post_burn_times)
+  I_list <- data.frame(post_burn_times)
     if (mat_vacc == FALSE){
       mat_chis <- chis*0
     } else{
@@ -57,17 +60,24 @@ Vacc_Sim <- function(parms,tau_1,tau_2,time_of_vacc,time_post_vacc, # put in sim
     # solve the ODE over given times
     solution <- ode(y=States_IC_vec, t=times,func=SIR, method = "ode45",
                     parms=parms)
+    
     # find the hospitalizations
     hospitalizations <- Track_Hospitalizations(solution,parms)
     
     # make solution and hosp tracker for after burn period
     solution_post_burn <- solution[solution[,1]>ceiling(365.25/7*(20)),]
     hosp_post_burn <- hospitalizations[hospitalizations[,1]>ceiling(365.25/7*(20)),]
+    S_vals <- solution_post_burn[,grep("S", colnames(solution))]
+    S_vals <- rowSums(S_vals)
+    S_list <- cbind(S_list, S_vals)
+    I_vals <- solution_post_burn[,grep("I", colnames(solution))]
+    I_vals <- rowSums(I_vals)
+    I_list <- cbind(I_list, I_vals)
     
     under1[,i+1] <- hosp_post_burn[,2]
     total_hosp[,i+1] <- rowSums(hosp_post_burn[,2:ncol(hosp_post_burn)])
     
-    hosp_post_vacc <- hosp_post_burn[hosp_post_burn[,1]>ceiling(365.25/7*(20+time_of_vacc)),]
+    hosp_post_vacc <- hosp_post_burn[hosp_post_burn[,1]>ceiling(365.25/7*(20+time_of_vacc+1)),]
     prop_coverage[i,] <- colSums(hosp_post_vacc[,2:ncol(hosp_post_vacc)])
     
     hosp_post_vacc <- as.data.frame(hosp_post_vacc)
@@ -81,5 +91,5 @@ Vacc_Sim <- function(parms,tau_1,tau_2,time_of_vacc,time_post_vacc, # put in sim
   }
   under1[,1] <- under1[,1]- min(under1[,1])
   total_hosp[,1] <- total_hosp[,1]-min(total_hosp[,1])
-  return(list(under1,total_hosp,prop_coverage,max_peak))
+  return(list(under1,total_hosp,prop_coverage,max_peak, S_list, I_list))
 }
